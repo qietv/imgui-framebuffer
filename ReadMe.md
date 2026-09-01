@@ -40,7 +40,7 @@ and community contributions are welcome.
 
 ### Platform Backends
 
-- [ ] Complete the Windows GDI backend.
+- [x] Complete the Windows GDI backend.
 - [ ] Add a UEFI GOP backend.
 - [ ] Add a Linux `/dev/fb*` backend.
 - [ ] Support other linear-framebuffer targets through community contributions.
