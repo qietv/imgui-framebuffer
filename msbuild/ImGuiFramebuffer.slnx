@@ -1,1 +1,8 @@
-<Solution />
+<Solution>
+  <Configurations>
+    <Platform Name="ARM64" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="ImGuiWin32GdiExample/ImGuiWin32GdiExample.vcxproj" Id="de9814af-210c-4499-9339-08fd33b5d2a0" />
+</Solution>

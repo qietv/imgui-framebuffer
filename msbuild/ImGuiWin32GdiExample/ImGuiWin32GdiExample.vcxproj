@@ -1,0 +1,47 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{DE9814AF-210C-4499-9339-08FD33B5D2A0}</ProjectGuid>
+    <RootNamespace>ImGuiWin32GdiExample</RootNamespace>
+    <MileProjectType>WindowsApplication</MileProjectType>
+    <MileProjectManifestFile>ImGuiWin32GdiExample.manifest</MileProjectManifestFile>
+    <MileProjectUseProjectProperties>true</MileProjectUseProjectProperties>
+    <MileProjectCompanyName>QieTV</MileProjectCompanyName>
+    <MileProjectFileDescription>Dear ImGui Framebuffer Win32 GDI Example</MileProjectFileDescription>
+    <MileProjectInternalName>ImGuiWin32GdiExample</MileProjectInternalName>
+    <MileProjectLegalCopyright>© QieTV. All rights reserved.</MileProjectLegalCopyright>
+    <MileProjectOriginalFilename>ImGuiWin32GdiExample.exe</MileProjectOriginalFilename>
+    <MileProjectProductName>ImGuiWin32GdiExample</MileProjectProductName>
+    <MileProjectVersion>1.0.$([System.DateTime]::Today.Subtract($([System.DateTime]::Parse('2026-09-01'))).TotalDays).0</MileProjectVersion>
+    <!-- <MileProjectVersionTag Condition="false">Alpha 1</MileProjectVersionTag> -->
+    <MileUniCrtDisableRuntimeDebuggingFeature>true</MileUniCrtDisableRuntimeDebuggingFeature>
+    <MileUniCrtEnableVcRuntimeWrapper>false</MileUniCrtEnableVcRuntimeWrapper>
+    <MileWindowsHelpersNoCppWinRTHelpers>true</MileWindowsHelpersNoCppWinRTHelpers>
+  </PropertyGroup>
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Platform.x86.props" />
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Platform.x64.props" />
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Platform.ARM64.props" />
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Cpp.Default.props" />
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Cpp.props" />
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <RuntimeLibrary Condition="'$(Configuration)' == 'Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)' == 'Release'">MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="ImGuiWin32GdiExample.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="ImGuiWin32GdiExample.manifest" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Mile.Windows.UniCrt">
+      <Version>1.2.410</Version>
+    </PackageReference>
+    <PackageReference Include="Mile.Windows.Helpers">
+      <Version>1.0.1171</Version>
+    </PackageReference>
+  </ItemGroup>
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Cpp.targets" />
+</Project>
