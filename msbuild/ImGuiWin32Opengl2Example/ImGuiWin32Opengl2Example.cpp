@@ -8,7 +8,9 @@
  * MAINTAINER: MouriNaruto (Kenji.Mouri@outlook.com)
  */
 
-// Dear ImGui: standalone example application for Windows API + Windows GDI
+#pragma comment(lib,"OpenGL32.lib")
+
+// Dear ImGui: standalone example application for Windows API + OpenGL2, using legacy fixed pipeline
 
 // Learn about Dear ImGui:
 // - FAQ                  https://dearimgui.com/faq
@@ -16,24 +18,32 @@
 // - Documentation        https://dearimgui.com/docs (same as your local docs/ folder).
 // - Introduction, links and more at the top of imgui.cpp
 
+// This is provided for completeness, however it is strongly recommended you use OpenGL with SDL or GLFW.
+// **DO NOT USE THIS CODE IF YOUR CODE/ENGINE IS USING MODERN OPENGL (SHADERS, VBO, VAO, etc.)**
+
 #include "imgui.h"
-#include "imgui_impl_gdi.h"
+#include "imgui_impl_opengl2.h"
 #include "imgui_impl_win32.h"
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <GL/gl.h>
 #include <tchar.h>
 
+// Data stored per platform window
+struct WGL_WindowData { HDC hDC; };
+
 // Data
-static int g_Width;
-static int g_Height;
-static HDC g_WindowDC;
-static HDC g_FrameBufferDC;
+static HGLRC            g_hRC;
+static WGL_WindowData   g_MainWindow;
+static int              g_Width;
+static int              g_Height;
 
 // Forward declarations of helper functions
-bool CreateDeviceGDI(HWND hWnd);
-void CleanupDeviceGDI(HWND hWnd);
+bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data);
+void CleanupDeviceWGL(HWND hWnd, WGL_WindowData* data);
+void ResetDeviceWGL();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // Main code
@@ -44,18 +54,19 @@ int main(int, char**)
     float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
 
     // Create application window
-    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"ImGui Example", nullptr };
+    WNDCLASSEXW wc = { sizeof(wc), CS_OWNDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"ImGui Example", nullptr };
     ::RegisterClassExW(&wc);
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Dear ImGui Win32+GDI Example", WS_OVERLAPPEDWINDOW, 100, 100, (int)(1280 * main_scale), (int)(800 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Dear ImGui Win32+OpenGL2 Example", WS_OVERLAPPEDWINDOW, 100, 100, (int)(1280 * main_scale), (int)(800 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
 
-    // Initialize Windows GDI
-    if (!::CreateDeviceGDI(hwnd))
+    // Initialize OpenGL
+    if (!CreateDeviceWGL(hwnd, &g_MainWindow))
     {
-        ::CleanupDeviceGDI(hwnd);
+        CleanupDeviceWGL(hwnd, &g_MainWindow);
         ::DestroyWindow(hwnd);
         ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return 1;
     }
+    wglMakeCurrent(g_MainWindow.hDC, g_hRC);
 
     // Show the window
     ::ShowWindow(hwnd, SW_SHOWDEFAULT);
@@ -78,8 +89,8 @@ int main(int, char**)
     style.FontScaleDpi = main_scale;        // Set initial font scale. (in docking branch: using io.ConfigDpiScaleFonts=true automatically overrides this for every window depending on the current monitor)
 
     // Setup Platform/Renderer backends
-    ImGui_ImplWin32_Init(hwnd);
-    ImGui_ImplGDI_Init();
+    ImGui_ImplWin32_InitForOpenGL(hwnd);
+    ImGui_ImplOpenGL2_Init();
 
     // Load Fonts
     // - If fonts are not explicitly loaded, Dear ImGui will select an embedded font: either AddFontDefaultVector() or AddFontDefaultBitmap().
@@ -127,7 +138,7 @@ int main(int, char**)
         }
 
         // Start the Dear ImGui frame
-        ImGui_ImplGDI_NewFrame();
+        ImGui_ImplOpenGL2_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
@@ -170,17 +181,27 @@ int main(int, char**)
 
         // Rendering
         ImGui::Render();
-        ImGui_ImplGDI_RenderDrawData(ImGui::GetDrawData(), g_FrameBufferDC, &clear_color);
+        glViewport(0, 0, g_Width, g_Height);
+        glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        // If you are using this code with non-legacy OpenGL header/contexts (which you should not, prefer using imgui_impl_opengl3.cpp!!),
+        // you may need to backup/reset/restore other state, e.g. for current shader using the commented lines below.
+        //GLint last_program;
+        //glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
+        //glUseProgram(0);
+        ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
 
         // Present
-        ::BitBlt(g_WindowDC, 0, 0, g_Width, g_Height, g_FrameBufferDC, 0, 0, SRCCOPY);
+        ::SwapBuffers(g_MainWindow.hDC);
     }
 
-    ImGui_ImplGDI_Shutdown();
+    ImGui_ImplOpenGL2_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
 
-    ::CleanupDeviceGDI(hwnd);
+    CleanupDeviceWGL(hwnd, &g_MainWindow);
+    wglDeleteContext(g_hRC);
     ::DestroyWindow(hwnd);
     ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
 
@@ -188,54 +209,33 @@ int main(int, char**)
 }
 
 // Helper functions
-
-bool CreateDeviceGDI(HWND hWnd)
+bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data)
 {
-    // Cleanup previous GDI resources (if any)
-    ::CleanupDeviceGDI(hWnd);
+    HDC hDc = ::GetDC(hWnd);
+    PIXELFORMATDESCRIPTOR pfd = { 0 };
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
 
-    bool result = false;
+    const int pf = ::ChoosePixelFormat(hDc, &pfd);
+    if (pf == 0)
+        return false;
+    if (::SetPixelFormat(hDc, pf, &pfd) == FALSE)
+        return false;
+    ::ReleaseDC(hWnd, hDc);
 
-    // Create new GDI resources
-    do
-    {
-        g_WindowDC = ::GetDC(hWnd);
-        if (!g_WindowDC)
-        {
-            break;
-        }
-
-        g_FrameBufferDC = ::CreateCompatibleDC(g_WindowDC);
-        if (!g_FrameBufferDC)
-        {
-            break;
-        }
-
-        result = true;
-
-    } while (false);
-    if (!result)
-    {
-        // Cleanup in case of failure
-        ::CleanupDeviceGDI(hWnd);
-    }
-
-    return result;
+    data->hDC = ::GetDC(hWnd);
+    if (!g_hRC)
+        g_hRC = wglCreateContext(data->hDC);
+    return true;
 }
 
-void CleanupDeviceGDI(HWND hWnd)
+void CleanupDeviceWGL(HWND hWnd, WGL_WindowData* data)
 {
-    if (g_FrameBufferDC)
-    {
-        ::DeleteDC(g_FrameBufferDC);
-        g_FrameBufferDC = nullptr;
-    }
-
-    if (g_WindowDC)
-    {
-        ::ReleaseDC(hWnd, g_WindowDC);
-        g_WindowDC = nullptr;
-    }
+    wglMakeCurrent(nullptr, nullptr);
+    ::ReleaseDC(hWnd, data->hDC);
 }
 
 // Forward declare message handler from imgui_impl_win32.cpp

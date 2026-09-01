@@ -23,8 +23,8 @@
     <ClCompile Include="..\..\imgui\backends\imgui_impl_win32.cpp">
       <Filter>imgui\backends</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\backends\imgui_impl_gdi.cpp">
-      <Filter>backends</Filter>
+    <ClCompile Include="..\..\imgui\backends\imgui_impl_opengl2.cpp">
+      <Filter>imgui\backends</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -33,9 +33,6 @@
     </Filter>
     <Filter Include="imgui\backends">
       <UniqueIdentifier>{3ce7e76f-839c-457b-bc6c-c73c6d20924d}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="backends">
-      <UniqueIdentifier>{446fe28b-1dd5-4c9d-bdd3-a115059a4445}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -60,8 +57,8 @@
     <ClInclude Include="..\..\imgui\backends\imgui_impl_win32.h">
       <Filter>imgui\backends</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\backends\imgui_impl_gdi.h">
-      <Filter>backends</Filter>
+    <ClInclude Include="..\..\imgui\backends\imgui_impl_opengl2.h">
+      <Filter>imgui\backends</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
