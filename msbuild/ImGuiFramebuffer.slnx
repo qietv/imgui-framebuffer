@@ -5,4 +5,5 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="ImGuiWin32GdiExample/ImGuiWin32GdiExample.vcxproj" Id="de9814af-210c-4499-9339-08fd33b5d2a0" />
+  <Project Path="ImGuiWin32Opengl2Example/ImGuiWin32Opengl2Example.vcxproj" Id="88d2e1e9-a909-4b23-ac23-37f6d55f15a3" />
 </Solution>

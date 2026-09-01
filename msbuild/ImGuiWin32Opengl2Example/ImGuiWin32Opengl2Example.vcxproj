@@ -1,0 +1,69 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{88D2E1E9-A909-4B23-AC23-37F6D55F15A3}</ProjectGuid>
+    <RootNamespace>ImGuiWin32Opengl2Example</RootNamespace>
+    <MileProjectType>ConsoleApplication</MileProjectType>
+    <MileProjectManifestFile>ImGuiWin32Opengl2Example.manifest</MileProjectManifestFile>
+    <MileProjectUseProjectProperties>true</MileProjectUseProjectProperties>
+    <MileProjectCompanyName>QieTV</MileProjectCompanyName>
+    <MileProjectFileDescription>Dear ImGui Framebuffer Win32 OpenGL2 Example</MileProjectFileDescription>
+    <MileProjectInternalName>ImGuiWin32Opengl2Example</MileProjectInternalName>
+    <MileProjectLegalCopyright>© QieTV. All rights reserved.</MileProjectLegalCopyright>
+    <MileProjectOriginalFilename>ImGuiWin32Opengl2Example.exe</MileProjectOriginalFilename>
+    <MileProjectProductName>ImGuiWin32Opengl2Example</MileProjectProductName>
+    <MileProjectVersion>1.0.$([System.DateTime]::Today.Subtract($([System.DateTime]::Parse('2026-09-01'))).TotalDays).0</MileProjectVersion>
+    <!-- <MileProjectVersionTag Condition="false">Alpha 1</MileProjectVersionTag> -->
+    <MileUniCrtDisableRuntimeDebuggingFeature>true</MileUniCrtDisableRuntimeDebuggingFeature>
+    <MileUniCrtEnableVcRuntimeWrapper>false</MileUniCrtEnableVcRuntimeWrapper>
+    <MileWindowsHelpersNoCppWinRTHelpers>true</MileWindowsHelpersNoCppWinRTHelpers>
+  </PropertyGroup>
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Platform.x86.props" />
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Platform.x64.props" />
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Platform.ARM64.props" />
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Cpp.Default.props" />
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Cpp.props" />
+  <PropertyGroup>
+    <IncludePath>$(MSBuildThisFileDirectory)..\..\imgui\;$(IncludePath)</IncludePath>
+    <IncludePath>$(MSBuildThisFileDirectory)..\..\imgui\backends\;$(IncludePath)</IncludePath>
+    <IncludePath>$(MSBuildThisFileDirectory)..\..\backends\;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <RuntimeLibrary Condition="'$(Configuration)' == 'Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)' == 'Release'">MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\backends\imgui_impl_gdi.cpp" />
+    <ClCompile Include="..\..\imgui\backends\imgui_impl_win32.cpp" />
+    <ClCompile Include="..\..\imgui\imgui.cpp" />
+    <ClCompile Include="..\..\imgui\imgui_demo.cpp" />
+    <ClCompile Include="..\..\imgui\imgui_draw.cpp" />
+    <ClCompile Include="..\..\imgui\imgui_tables.cpp" />
+    <ClCompile Include="..\..\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="ImGuiWin32Opengl2Example.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="ImGuiWin32Opengl2Example.manifest" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Mile.Windows.UniCrt">
+      <Version>1.2.410</Version>
+    </PackageReference>
+    <PackageReference Include="Mile.Windows.Helpers">
+      <Version>1.0.1171</Version>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\backends\imgui_impl_gdi.h" />
+    <ClInclude Include="..\..\imgui\backends\imgui_impl_win32.h" />
+    <ClInclude Include="..\..\imgui\imconfig.h" />
+    <ClInclude Include="..\..\imgui\imgui.h" />
+    <ClInclude Include="..\..\imgui\imgui_internal.h" />
+    <ClInclude Include="..\..\imgui\imstb_rectpack.h" />
+    <ClInclude Include="..\..\imgui\imstb_textedit.h" />
+    <ClInclude Include="..\..\imgui\imstb_truetype.h" />
+  </ItemGroup>
+  <Import Sdk="Mile.Project.Configurations" Version="1.0.1917" Project="Mile.Project.Cpp.targets" />
+</Project>
