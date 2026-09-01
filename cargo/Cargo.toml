@@ -1,0 +1,13 @@
+##
+## PROJECT:    imgui-framebuffer
+## FILE:       Cargo.toml
+## PURPOSE:    The root Cargo.toml for C/C++ example projects built with Cargo
+## 
+## LICENSE:    The MIT License
+## 
+## MAINTAINER: MouriNaruto (Kenji.Mouri@outlook.com)
+##
+
+[workspace]
+resolver = "2"
+members = []
