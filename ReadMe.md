@@ -18,10 +18,10 @@ This project follows up on https://github.com/ocornut/imgui/pull/9406.
 ## Project Structure
 
 ```text
-  imgui     Dear ImGui mainline repository submodule
-  backends  Renderer and platform backend implementations
-  msbuild   C/C++ example projects built with MSBuild
-  cargo     C/C++ example projects built with Cargo
+imgui     Dear ImGui mainline repository submodule
+backends  Renderer and platform backend implementations
+msbuild   C/C++ example projects built with MSBuild
+cargo     C/C++ example projects built with Cargo
 ```
 
 ## Platform Support
