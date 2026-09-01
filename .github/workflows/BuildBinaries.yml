@@ -27,7 +27,7 @@ jobs:
         cd msbuild
         msbuild /m BuildAllTargets.proj
     - name: Prepare artifacts
-      run: rm Output\* -vb -Recurse -Force -Include *.exp, *.idb, *.ilk, *.iobj, *.ipdb, *.lastbuildstate, *.lib, *.obj, *.res, *.tlog
+      run: rm msbuild\Output\* -vb -Recurse -Force -Include *.exp, *.idb, *.ilk, *.iobj, *.ipdb, *.lastbuildstate, *.lib, *.obj, *.res, *.tlog
     - uses: actions/upload-artifact@v4
       with:
         name: imgui-framebuffer-output
