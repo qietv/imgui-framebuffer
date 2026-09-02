@@ -358,37 +358,6 @@ static inline ImU32 ImGui_ImplGDI_Div255Rounded(ImU32 value)
     return (value + (value >> 8)) >> 8;
 }
 
-static inline ImU32 ImGui_ImplGDI_PackFramebufferColor(
-    int red,
-    int green,
-    int blue,
-    int alpha)
-{
-    red = ::InternalClamp(red, 0, 255);
-    green = ::InternalClamp(green, 0, 255);
-    blue = ::InternalClamp(blue, 0, 255);
-    alpha = ::InternalClamp(alpha, 0, 255);
-
-    // 32-bit GDI DIB memory order: B, G, R, A.
-    return ((ImU32)alpha << 24) |
-        ((ImU32)red << 16) |
-        ((ImU32)green << 8) |
-        ((ImU32)blue << 0);
-}
-
-static inline void ImGui_ImplGDI_UnpackFramebufferColor(
-    ImU32 color,
-    int& red,
-    int& green,
-    int& blue,
-    int& alpha)
-{
-    blue = (color >> 0) & 0xFF;
-    green = (color >> 8) & 0xFF;
-    red = (color >> 16) & 0xFF;
-    alpha = (color >> 24) & 0xFF;
-}
-
 static inline void ImGui_ImplGDI_BlendOver(
     ImU32* destination,
     int source_red,
@@ -396,51 +365,54 @@ static inline void ImGui_ImplGDI_BlendOver(
     int source_blue,
     int source_alpha)
 {
-    if (source_alpha <= 0)
+    const ImU32 alpha = (ImU32)source_alpha;
+
+    if (alpha == 0u)
         return;
 
-    if (source_alpha >= 255)
+    if (alpha == 255u)
     {
-        *destination = ImGui_ImplGDI_PackFramebufferColor(
-            source_red,
-            source_green,
-            source_blue,
-            255);
+        *destination =
+            0xFF000000u |
+            ((ImU32)source_red << 16) |
+            ((ImU32)source_green << 8) |
+            ((ImU32)source_blue << 0);
 
         return;
     }
 
-    int destination_red;
-    int destination_green;
-    int destination_blue;
-    int destination_alpha;
+    const ImU32 destination_color = *destination;
+    const ImU32 inverse_alpha = 255u - alpha;
 
-    ImGui_ImplGDI_UnpackFramebufferColor(
-        *destination,
-        destination_red,
-        destination_green,
-        destination_blue,
-        destination_alpha);
+    const ImU32 destination_blue =
+        (destination_color >> 0) & 0xFFu;
 
-    const int inverse_alpha = 255 - source_alpha;
+    const ImU32 destination_green =
+        (destination_color >> 8) & 0xFFu;
 
-    const int output_red =
-        (source_red * source_alpha +
-            destination_red * inverse_alpha + 127) / 255;
+    const ImU32 destination_red =
+        (destination_color >> 16) & 0xFFu;
 
-    const int output_green =
-        (source_green * source_alpha +
-            destination_green * inverse_alpha + 127) / 255;
+    const ImU32 output_red =
+        ImGui_ImplGDI_Div255Rounded(
+            (ImU32)source_red * alpha +
+            destination_red * inverse_alpha);
 
-    const int output_blue =
-        (source_blue * source_alpha +
-            destination_blue * inverse_alpha + 127) / 255;
+    const ImU32 output_green =
+        ImGui_ImplGDI_Div255Rounded(
+            (ImU32)source_green * alpha +
+            destination_green * inverse_alpha);
 
-    *destination = ImGui_ImplGDI_PackFramebufferColor(
-        output_red,
-        output_green,
-        output_blue,
-        255);
+    const ImU32 output_blue =
+        ImGui_ImplGDI_Div255Rounded(
+            (ImU32)source_blue * alpha +
+            destination_blue * inverse_alpha);
+
+    *destination =
+        0xFF000000u |
+        (output_red << 16) |
+        (output_green << 8) |
+        (output_blue << 0);
 }
 
 static bool ImGui_ImplGDI_ClipPixelBounds(
