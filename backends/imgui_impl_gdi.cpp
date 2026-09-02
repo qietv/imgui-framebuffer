@@ -358,6 +358,15 @@ static inline ImU32 ImGui_ImplGDI_Div255Rounded(ImU32 value)
     return (value + (value >> 8)) >> 8;
 }
 
+static inline void ImGui_ImplGDI_FillSpan(
+    ImU32* destination,
+    size_t pixel_count,
+    ImU32 color)
+{
+    for (size_t i = 0; i < pixel_count; ++i)
+        destination[i] = color;
+}
+
 static inline void ImGui_ImplGDI_BlendOver(
     ImU32* destination,
     int source_red,
@@ -450,7 +459,6 @@ static bool ImGui_ImplGDI_ClipPixelBounds(
 }
 
 static void ImGui_ImplGDI_RenderSolidRectangleCommand(
-    HDC hdc,
     ImU32* pixel_buffer,
     int framebuffer_width,
     int framebuffer_height,
@@ -499,28 +507,33 @@ static void ImGui_ImplGDI_RenderSolidRectangleCommand(
         return;
     }
 
-    RECT rectangle_handle;
-    rectangle_handle.left = x0;
-    rectangle_handle.top = y0;
-    rectangle_handle.right = x1;
-    rectangle_handle.bottom = y1;
+    IM_ASSERT(pixel_buffer != nullptr);
+
+    const int span_width = x1 - x0;
+
+    ImU32* destination_row =
+        pixel_buffer + (size_t)y0 * framebuffer_width + x0;
 
     if (color.Alpha == 255)
     {
-        const COLORREF previous_color = ::SetDCBrushColor(
-            hdc,
-            RGB(color.Red, color.Green, color.Blue));
+        const ImU32 fill_color =
+            0xFF000000u |
+            ((ImU32)color.Red << 16) |
+            ((ImU32)color.Green << 8) |
+            ((ImU32)color.Blue << 0);
 
-        ::FillRect(
-            hdc,
-            &rectangle_handle,
-            (HBRUSH)::GetStockObject(DC_BRUSH));
+        for (int y = y0; y < y1; ++y)
+        {
+            ImGui_ImplGDI_FillSpan(
+                destination_row,
+                (size_t)span_width,
+                fill_color);
 
-        ::SetDCBrushColor(hdc, previous_color);
+            destination_row += framebuffer_width;
+        }
+
         return;
     }
-
-    IM_ASSERT(pixel_buffer != nullptr);
 
     const ImU32 source_alpha = color.Alpha;
     const ImU32 inverse_alpha = 255u - source_alpha;
@@ -533,11 +546,6 @@ static void ImGui_ImplGDI_RenderSolidRectangleCommand(
 
     const ImU32 source_blue_alpha =
         (ImU32)color.Blue * source_alpha;
-
-    const int span_width = x1 - x0;
-
-    ImU32* destination_row =
-        pixel_buffer + (size_t)y0 * framebuffer_width + x0;
 
     for (int y = y0; y < y1; ++y)
     {
@@ -1061,7 +1069,6 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 }
 
 static void ImGui_ImplGDI_RenderCommand(
-    HDC hdc,
     ImU32* pixel_buffer,
     int framebuffer_width,
     int framebuffer_height,
@@ -1076,7 +1083,6 @@ static void ImGui_ImplGDI_RenderCommand(
 
     case NAIVE_SWR_RENDER_TYPE_SOLID_RECTANGLE:
         ImGui_ImplGDI_RenderSolidRectangleCommand(
-            hdc,
             pixel_buffer,
             framebuffer_width,
             framebuffer_height,
@@ -1187,10 +1193,25 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb
     // Clear the framebuffer with the background color (if any)
     if (clear_color)
     {
-        COLORREF previous_color = ::SetDCBrushColor(hdc, RGB((BYTE)(clear_color->x * 255.0f), (BYTE)(clear_color->y * 255.0f), (BYTE)(clear_color->z * 255.0f)));
-        RECT rect = { 0, 0, fb_width, fb_height };
-        ::FillRect(hdc, &rect, (HBRUSH)::GetStockObject(DC_BRUSH));
-        ::SetDCBrushColor(hdc, previous_color);
+        const ImU32 red =
+            (ImU32)(BYTE)(clear_color->x * 255.0f);
+
+        const ImU32 green =
+            (ImU32)(BYTE)(clear_color->y * 255.0f);
+
+        const ImU32 blue =
+            (ImU32)(BYTE)(clear_color->z * 255.0f);
+
+        const ImU32 clear_pixel =
+            0xFF000000u |
+            (red << 16) |
+            (green << 8) |
+            blue;
+
+        ImGui_ImplGDI_FillSpan(
+            pixel_buffer,
+            (size_t)fb_width * (size_t)fb_height,
+            clear_pixel);
     }
 
     // Will project scissor/clipping rectangles into framebuffer space
@@ -1239,7 +1260,6 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb
                         &render_command);
 
                     ImGui_ImplGDI_RenderCommand(
-                        hdc,
                         pixel_buffer,
                         fb_width,
                         fb_height,
