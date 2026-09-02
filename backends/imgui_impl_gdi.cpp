@@ -350,6 +350,14 @@ static inline int ImGui_ImplGDI_Mul255(int a, int b)
     return (a * b + 127) / 255;
 }
 
+// Equivalent to (value + 127) / 255 for value in [0, 255 * 255],
+// but expressed using operations that are easier to vectorize.
+static inline ImU32 ImGui_ImplGDI_Div255Rounded(ImU32 value)
+{
+    value += 128u;
+    return (value + (value >> 8)) >> 8;
+}
+
 static inline ImU32 ImGui_ImplGDI_PackFramebufferColor(
     int red,
     int green,
@@ -471,8 +479,7 @@ static bool ImGui_ImplGDI_ClipPixelBounds(
 
 static void ImGui_ImplGDI_RenderSolidRectangleCommand(
     HDC hdc,
-    HDC solid_alpha_dev_ctx_handle,
-    ImU32* solid_alpha_pixel,
+    ImU32* pixel_buffer,
     int framebuffer_width,
     int framebuffer_height,
     const ImVec4& clip_rect,
@@ -541,29 +548,64 @@ static void ImGui_ImplGDI_RenderSolidRectangleCommand(
         return;
     }
 
-    *solid_alpha_pixel =
-        ((ImU32)color.Red << 16) |
-        ((ImU32)color.Green << 8) |
-        ((ImU32)color.Blue << 0);
+    IM_ASSERT(pixel_buffer != nullptr);
 
-    BLENDFUNCTION blend_function = {};
-    blend_function.BlendOp = AC_SRC_OVER;
-    blend_function.BlendFlags = 0;
-    blend_function.SourceConstantAlpha = color.Alpha;
-    blend_function.AlphaFormat = 0;
+    const ImU32 source_alpha = color.Alpha;
+    const ImU32 inverse_alpha = 255u - source_alpha;
 
-    ::GdiAlphaBlend(
-        hdc,
-        x0,
-        y0,
-        x1 - x0,
-        y1 - y0,
-        solid_alpha_dev_ctx_handle,
-        0,
-        0,
-        1,
-        1,
-        blend_function);
+    const ImU32 source_red_alpha =
+        (ImU32)color.Red * source_alpha;
+
+    const ImU32 source_green_alpha =
+        (ImU32)color.Green * source_alpha;
+
+    const ImU32 source_blue_alpha =
+        (ImU32)color.Blue * source_alpha;
+
+    const int span_width = x1 - x0;
+
+    ImU32* destination_row =
+        pixel_buffer + (size_t)y0 * framebuffer_width + x0;
+
+    for (int y = y0; y < y1; ++y)
+    {
+        for (int x = 0; x < span_width; ++x)
+        {
+            const ImU32 destination_color = destination_row[x];
+
+            const ImU32 destination_blue =
+                (destination_color >> 0) & 0xFFu;
+
+            const ImU32 destination_green =
+                (destination_color >> 8) & 0xFFu;
+
+            const ImU32 destination_red =
+                (destination_color >> 16) & 0xFFu;
+
+            const ImU32 output_red =
+                ImGui_ImplGDI_Div255Rounded(
+                    source_red_alpha +
+                    destination_red * inverse_alpha);
+
+            const ImU32 output_green =
+                ImGui_ImplGDI_Div255Rounded(
+                    source_green_alpha +
+                    destination_green * inverse_alpha);
+
+            const ImU32 output_blue =
+                ImGui_ImplGDI_Div255Rounded(
+                    source_blue_alpha +
+                    destination_blue * inverse_alpha);
+
+            destination_row[x] =
+                0xFF000000u |
+                (output_red << 16) |
+                (output_green << 8) |
+                output_blue;
+        }
+
+        destination_row += framebuffer_width;
+    }
 }
 
 template <NAIVE_SWR_RENDER_TYPE RenderType>
@@ -1048,8 +1090,6 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
 static void ImGui_ImplGDI_RenderCommand(
     HDC hdc,
-    HDC solid_alpha_dev_ctx_handle,
-    ImU32* solid_alpha_pixel,
     ImU32* pixel_buffer,
     int framebuffer_width,
     int framebuffer_height,
@@ -1065,8 +1105,7 @@ static void ImGui_ImplGDI_RenderCommand(
     case NAIVE_SWR_RENDER_TYPE_SOLID_RECTANGLE:
         ImGui_ImplGDI_RenderSolidRectangleCommand(
             hdc,
-            solid_alpha_dev_ctx_handle,
-            solid_alpha_pixel,
+            pixel_buffer,
             framebuffer_width,
             framebuffer_height,
             clip_rect,
@@ -1155,37 +1194,6 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb
 
     // Setup desired GDI state
 
-    HDC solid_alpha_dev_ctx_handle = nullptr;
-    ImU32* solid_alpha_pixel = nullptr;
-
-    // Create a temporary 1x1 DIB with the rectangle color and use GdiAlphaBlend to stretch it over the target rectangle.
-    {
-        solid_alpha_dev_ctx_handle = ::CreateCompatibleDC(hdc);
-        if (solid_alpha_dev_ctx_handle)
-        {
-            BITMAPINFO bitmap_info = {};
-            bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            bitmap_info.bmiHeader.biWidth = 1;
-            bitmap_info.bmiHeader.biHeight = -1;
-            bitmap_info.bmiHeader.biPlanes = 1;
-            bitmap_info.bmiHeader.biBitCount = 32;
-            bitmap_info.bmiHeader.biCompression = BI_RGB;
-            HBITMAP bitmap = ::CreateDIBSection(solid_alpha_dev_ctx_handle, &bitmap_info, DIB_RGB_COLORS, (void**)&solid_alpha_pixel, nullptr, 0);
-            if (bitmap)
-            {
-                ::DeleteObject(::SelectObject(solid_alpha_dev_ctx_handle, bitmap));
-                ::DeleteObject(bitmap);
-            }
-            else
-            {
-                ::DeleteDC(solid_alpha_dev_ctx_handle);
-                solid_alpha_dev_ctx_handle = nullptr;
-                solid_alpha_pixel = nullptr;
-            }
-        }
-    }
-    IM_ASSERT(solid_alpha_dev_ctx_handle != nullptr && solid_alpha_pixel != nullptr && "Failed to create compatible DC and DIB section for solid rectangle alpha blending!");
-
     ImU32* pixel_buffer = nullptr;
     {
         BITMAPINFO bitmap_info = {};
@@ -1260,8 +1268,6 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb
 
                     ImGui_ImplGDI_RenderCommand(
                         hdc,
-                        solid_alpha_dev_ctx_handle,
-                        solid_alpha_pixel,
                         pixel_buffer,
                         fb_width,
                         fb_height,
@@ -1271,13 +1277,6 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb
                 }
             }
         }
-    }
-
-    // Free temporary resources
-    {
-        ::DeleteDC(solid_alpha_dev_ctx_handle);
-        solid_alpha_dev_ctx_handle = nullptr;
-        solid_alpha_pixel = nullptr;
     }
 }
 
