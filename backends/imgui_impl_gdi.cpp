@@ -896,7 +896,11 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     if (area > -0.000001f && area < 0.000001f)
         return;
 
-    const float inverse_area = 1.0f / area;
+    const bool reverse_winding = area < 0.0f;
+    const float normalized_area =
+        reverse_winding ? -area : area;
+
+    const float inverse_area = 1.0f / normalized_area;
 
     float minimum_x = point_1.X;
     float minimum_y = point_1.Y;
@@ -939,13 +943,13 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     const bool top_left_3 =
         ImGui_ImplGDI_IsTopLeft(point_1, point_2);
 
-    const float edge_1_step_x = point_3.Y - point_2.Y;
-    const float edge_2_step_x = point_1.Y - point_3.Y;
-    const float edge_3_step_x = point_2.Y - point_1.Y;
+    float edge_1_step_x = point_3.Y - point_2.Y;
+    float edge_2_step_x = point_1.Y - point_3.Y;
+    float edge_3_step_x = point_2.Y - point_1.Y;
 
-    const float edge_1_step_y = -(point_3.X - point_2.X);
-    const float edge_2_step_y = -(point_1.X - point_3.X);
-    const float edge_3_step_y = -(point_2.X - point_1.X);
+    float edge_1_step_y = -(point_3.X - point_2.X);
+    float edge_2_step_y = -(point_1.X - point_3.X);
+    float edge_3_step_y = -(point_2.X - point_1.X);
 
     const float first_pixel_x = (float)x0 + 0.5f;
     const float first_pixel_y = (float)y0 + 0.5f;
@@ -968,6 +972,28 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         first_pixel_x,
         first_pixel_y);
 
+    /*
+     * The previous implementation multiplied every edge value by
+     * area for every candidate pixel. Normalize the winding once
+     * instead. The normalized edges and area are both positive for
+     * covered pixels, while the resulting barycentric weights remain
+     * unchanged.
+     */
+    if (reverse_winding)
+    {
+        edge_1_row = -edge_1_row;
+        edge_2_row = -edge_2_row;
+        edge_3_row = -edge_3_row;
+
+        edge_1_step_x = -edge_1_step_x;
+        edge_2_step_x = -edge_2_step_x;
+        edge_3_step_x = -edge_3_step_x;
+
+        edge_1_step_y = -edge_1_step_y;
+        edge_2_step_y = -edge_2_step_y;
+        edge_3_step_y = -edge_3_step_y;
+    }
+
     const NAIVE_SWR_COLOR& color_1 = triangle.Colors[0];
     const NAIVE_SWR_COLOR& color_2 = triangle.Colors[1];
     const NAIVE_SWR_COLOR& color_3 = triangle.Colors[2];
@@ -985,17 +1011,13 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
         for (int x = x0; x < x1; ++x)
         {
-            const float signed_edge_1 = edge_1 * area;
-            const float signed_edge_2 = edge_2 * area;
-            const float signed_edge_3 = edge_3 * area;
-
             const bool inside =
-                signed_edge_1 >= 0.0f &&
-                signed_edge_2 >= 0.0f &&
-                signed_edge_3 >= 0.0f &&
-                (signed_edge_1 != 0.0f || top_left_1) &&
-                (signed_edge_2 != 0.0f || top_left_2) &&
-                (signed_edge_3 != 0.0f || top_left_3);
+                edge_1 >= 0.0f &&
+                edge_2 >= 0.0f &&
+                edge_3 >= 0.0f &&
+                (edge_1 != 0.0f || top_left_1) &&
+                (edge_2 != 0.0f || top_left_2) &&
+                (edge_3 != 0.0f || top_left_3);
 
             if (inside)
             {
