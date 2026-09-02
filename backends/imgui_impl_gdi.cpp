@@ -252,6 +252,46 @@ namespace
     }
 }
 
+struct ImGui_ImplGDI_Data
+{
+    ImU32* FramebufferPixels;
+    size_t FramebufferCapacity;
+
+    ImGui_ImplGDI_Data()
+    {
+        memset(this, 0, sizeof(*this));
+    }
+};
+
+static ImGui_ImplGDI_Data* ImGui_ImplGDI_GetBackendData()
+{
+    return ImGui::GetCurrentContext()
+        ? (ImGui_ImplGDI_Data*)ImGui::GetIO().BackendRendererUserData
+        : nullptr;
+}
+
+static bool ImGui_ImplGDI_EnsureFramebufferCapacity(
+    ImGui_ImplGDI_Data* backend_data,
+    size_t required_pixel_count)
+{
+    if (backend_data->FramebufferCapacity >= required_pixel_count)
+        return true;
+
+    ImU32* new_pixels = (ImU32*)IM_ALLOC(
+        required_pixel_count * sizeof(ImU32));
+
+    if (!new_pixels)
+        return false;
+
+    if (backend_data->FramebufferPixels)
+        IM_FREE(backend_data->FramebufferPixels);
+
+    backend_data->FramebufferPixels = new_pixels;
+    backend_data->FramebufferCapacity = required_pixel_count;
+
+    return true;
+}
+
 // Texture data
 struct ImGui_ImplGDI_Texture
 {
@@ -319,13 +359,30 @@ IMGUI_IMPL_API bool ImGui_ImplGDI_Init()
     ImGuiIO& io = ImGui::GetIO();
     IMGUI_CHECKVERSION();
 
-    // Setup backend capabilities flags
+    IM_ASSERT(
+        io.BackendRendererUserData == nullptr &&
+        "Already initialized a renderer backend!");
+
+    ImGui_ImplGDI_Data* backend_data = IM_NEW(ImGui_ImplGDI_Data)();
+
+    if (!backend_data)
+        return false;
+
+    io.BackendRendererUserData = backend_data;
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+
     return true;
 }
 
 IMGUI_IMPL_API void ImGui_ImplGDI_Shutdown()
 {
+    ImGui_ImplGDI_Data* backend_data =
+        ImGui_ImplGDI_GetBackendData();
+
+    IM_ASSERT(
+        backend_data != nullptr &&
+        "No renderer backend to shutdown!");
+
     for (ImTextureData* tex : ImGui::GetPlatformIO().Textures)
     {
         if (tex->RefCount == 1)
@@ -335,9 +392,16 @@ IMGUI_IMPL_API void ImGui_ImplGDI_Shutdown()
         }
     }
 
+    if (backend_data->FramebufferPixels)
+        IM_FREE(backend_data->FramebufferPixels);
+
+    IM_DELETE(backend_data);
+
     ImGuiIO& io = ImGui::GetIO();
     io.BackendRendererUserData = nullptr;
-    io.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
+    io.BackendFlags &= ~(
+        ImGuiBackendFlags_RendererHasVtxOffset |
+        ImGuiBackendFlags_RendererHasTextures);
 }
 
 IMGUI_IMPL_API void ImGui_ImplGDI_NewFrame()
@@ -1151,7 +1215,10 @@ static void ImGui_ImplGDI_RenderCommand(
     }
 }
 
-IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb_dev_ctx_handle, ImVec4* clear_color)
+IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
+    ImDrawData* draw_data,
+    void* output_dev_ctx_handle,
+    ImVec4* clear_color)
 {
     int fb_width = (int)(draw_data->DisplaySize.x * draw_data->FramebufferScale.x);
     int fb_height = (int)(draw_data->DisplaySize.y * draw_data->FramebufferScale.y);
@@ -1160,8 +1227,12 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb
     if (fb_width == 0 || fb_height == 0)
         return;
 
-    HDC hdc = (HDC)fb_dev_ctx_handle;
-    IM_ASSERT(hdc != nullptr && "Invalid framebuffer device context!");
+    HDC output_hdc = (HDC)output_dev_ctx_handle;
+    IM_ASSERT(output_hdc != nullptr && "Invalid output device context!");
+
+    ImGui_ImplGDI_Data* backend_data = ImGui_ImplGDI_GetBackendData();
+
+    IM_ASSERT(backend_data != nullptr);
 
     // Catch up with texture updates. Most of the times, the list will have 1 element with an OK status, aka nothing to do.
     // (This almost always points to ImGui::GetPlatformIO().Textures[] but is part of ImDrawData to allow overriding or disabling texture updates).
@@ -1172,23 +1243,18 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb
 
     // Setup desired GDI state
 
-    ImU32* pixel_buffer = nullptr;
+    const size_t required_pixel_count =
+        (size_t)fb_width * (size_t)fb_height;
+
+    if (!ImGui_ImplGDI_EnsureFramebufferCapacity(
+        backend_data,
+        required_pixel_count))
     {
-        BITMAPINFO bitmap_info = {};
-        bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bitmap_info.bmiHeader.biWidth = fb_width;
-        bitmap_info.bmiHeader.biHeight = -fb_height;
-        bitmap_info.bmiHeader.biPlanes = 1;
-        bitmap_info.bmiHeader.biBitCount = 32;
-        bitmap_info.bmiHeader.biCompression = BI_RGB;
-        HBITMAP bitmap = ::CreateDIBSection(hdc, &bitmap_info, DIB_RGB_COLORS, (void**)&pixel_buffer, nullptr, 0);
-        if (bitmap)
-        {
-            ::DeleteObject(::SelectObject(hdc, bitmap));
-            ::DeleteObject(bitmap);
-        }
+        IM_ASSERT(false && "Failed to allocate framebuffer!");
+        return;
     }
-    IM_ASSERT(pixel_buffer != nullptr && "Failed to create DIB section for rendering!");
+
+    ImU32* pixel_buffer = backend_data->FramebufferPixels;
 
     // Clear the framebuffer with the background color (if any)
     if (clear_color)
@@ -1270,6 +1336,28 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb
             }
         }
     }
+
+    BITMAPINFO bitmap_info = {};
+    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmap_info.bmiHeader.biWidth = fb_width;
+    bitmap_info.bmiHeader.biHeight = -fb_height;
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    bitmap_info.bmiHeader.biCompression = BI_RGB;
+
+    ::SetDIBitsToDevice(
+        output_hdc,
+        0,
+        0,
+        (DWORD)fb_width,
+        (DWORD)fb_height,
+        0,
+        0,
+        0,
+        (UINT)fb_height,
+        pixel_buffer,
+        &bitmap_info,
+        DIB_RGB_COLORS);
 }
 
 #endif // #ifndef IMGUI_DISABLE

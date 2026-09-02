@@ -29,7 +29,6 @@
 static int g_Width;
 static int g_Height;
 static HDC g_WindowDC;
-static HDC g_FrameBufferDC;
 
 // Forward declarations of helper functions
 bool CreateDeviceGDI(HWND hWnd);
@@ -170,10 +169,10 @@ int main(int, char**)
 
         // Rendering
         ImGui::Render();
-        ImGui_ImplGDI_RenderDrawData(ImGui::GetDrawData(), g_FrameBufferDC, &clear_color);
-
-        // Present
-        ::BitBlt(g_WindowDC, 0, 0, g_Width, g_Height, g_FrameBufferDC, 0, 0, SRCCOPY);
+        ImGui_ImplGDI_RenderDrawData(
+            ImGui::GetDrawData(),
+            g_WindowDC,
+            &clear_color);
     }
 
     ImGui_ImplGDI_Shutdown();
@@ -205,12 +204,6 @@ bool CreateDeviceGDI(HWND hWnd)
             break;
         }
 
-        g_FrameBufferDC = ::CreateCompatibleDC(g_WindowDC);
-        if (!g_FrameBufferDC)
-        {
-            break;
-        }
-
         result = true;
 
     } while (false);
@@ -225,12 +218,6 @@ bool CreateDeviceGDI(HWND hWnd)
 
 void CleanupDeviceGDI(HWND hWnd)
 {
-    if (g_FrameBufferDC)
-    {
-        ::DeleteDC(g_FrameBufferDC);
-        g_FrameBufferDC = nullptr;
-    }
-
     if (g_WindowDC)
     {
         ::ReleaseDC(hWnd, g_WindowDC);

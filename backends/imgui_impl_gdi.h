@@ -23,6 +23,9 @@
 IMGUI_IMPL_API bool     ImGui_ImplGDI_Init();
 IMGUI_IMPL_API void     ImGui_ImplGDI_Shutdown();
 IMGUI_IMPL_API void     ImGui_ImplGDI_NewFrame();
-IMGUI_IMPL_API void     ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb_dev_ctx_handle, ImVec4* clear_color); // HDC fb_dev_ctx_handle
+IMGUI_IMPL_API void     ImGui_ImplGDI_RenderDrawData(
+    ImDrawData* draw_data,
+    void* output_dev_ctx_handle,
+    ImVec4* clear_color); // HDC output_dev_ctx_handle
 
 #endif // #ifndef IMGUI_DISABLE
