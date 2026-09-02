@@ -20,6 +20,213 @@
 //  2026-05-20: Initial version.
 
 #include "imgui.h"
+
+#ifndef IMGUI_DISABLE
+
+#include "naive_swr.h"
+
+static inline NAIVE_SWR_COLOR naive_swr_color_from_imgui(ImU32 value)
+{
+    NAIVE_SWR_COLOR color;
+
+    color.Red = (uint8_t)((value >> IM_COL32_R_SHIFT) & 0xFFu);
+    color.Green = (uint8_t)((value >> IM_COL32_G_SHIFT) & 0xFFu);
+    color.Blue = (uint8_t)((value >> IM_COL32_B_SHIFT) & 0xFFu);
+    color.Alpha = (uint8_t)((value >> IM_COL32_A_SHIFT) & 0xFFu);
+
+    return color;
+}
+
+static inline bool naive_swr_is_white_texture_coordinate(
+    const ImVec2& coordinate,
+    const ImVec2& white_texture_coordinate)
+{
+    return coordinate.x == white_texture_coordinate.x &&
+        coordinate.y == white_texture_coordinate.y;
+}
+
+uint32_t naive_swr_make_render_command(
+    const ImDrawVert* vertex_buffer,
+    const ImDrawIdx* index_buffer,
+    uint32_t remaining_element_count,
+    ImTextureFormat texture_format,
+    uint32_t texture_width,
+    uint32_t texture_height,
+    PNAIVE_SWR_RENDER_COMMAND render_command)
+{
+    IM_ASSERT(remaining_element_count >= 3);
+
+    const ImVec2 white_texture_coordinate =
+        ImGui::GetIO().Fonts->TexUvWhitePixel;
+
+    /*
+     * First try the canonical ImGui rectangle index pattern:
+     *
+     * A, B, C, A, C, D
+     */
+    if (remaining_element_count >= 6 &&
+        index_buffer[0] == index_buffer[3] &&
+        index_buffer[2] == index_buffer[4])
+    {
+        const ImDrawVert& a = vertex_buffer[index_buffer[0]];
+        const ImDrawVert& b = vertex_buffer[index_buffer[1]];
+        const ImDrawVert& c = vertex_buffer[index_buffer[2]];
+        const ImDrawVert& d = vertex_buffer[index_buffer[5]];
+
+        const bool position_is_rectangle =
+            a.pos.y == b.pos.y &&
+            b.pos.x == c.pos.x &&
+            c.pos.y == d.pos.y &&
+            d.pos.x == a.pos.x;
+
+        const bool color_is_uniform =
+            a.col == b.col &&
+            a.col == c.col &&
+            a.col == d.col;
+
+        const bool texture_is_rectangle =
+            a.uv.y == b.uv.y &&
+            b.uv.x == c.uv.x &&
+            c.uv.y == d.uv.y &&
+            d.uv.x == a.uv.x;
+
+        const bool texture_is_white =
+            naive_swr_is_white_texture_coordinate(
+                a.uv, white_texture_coordinate) &&
+            naive_swr_is_white_texture_coordinate(
+                b.uv, white_texture_coordinate) &&
+            naive_swr_is_white_texture_coordinate(
+                c.uv, white_texture_coordinate) &&
+            naive_swr_is_white_texture_coordinate(
+                d.uv, white_texture_coordinate);
+
+        if (position_is_rectangle &&
+            color_is_uniform &&
+            (texture_is_white || texture_is_rectangle))
+        {
+            render_command->Command.Rectangle.Position.X = a.pos.x;
+            render_command->Command.Rectangle.Position.Y = a.pos.y;
+
+            render_command->Command.Rectangle.Size.Width =
+                c.pos.x - a.pos.x;
+
+            render_command->Command.Rectangle.Size.Height =
+                c.pos.y - a.pos.y;
+
+            render_command->Command.Rectangle.Color =
+                naive_swr_color_from_imgui(a.col);
+
+            if (render_command->Command.Rectangle.Size.Width == 0.0f ||
+                render_command->Command.Rectangle.Size.Height == 0.0f ||
+                render_command->Command.Rectangle.Color.Alpha == 0)
+            {
+                render_command->Type = NAIVE_SWR_RENDER_TYPE_SKIPPED;
+
+                return 6;
+            }
+
+            if (texture_is_white)
+            {
+                render_command->Type = NAIVE_SWR_RENDER_TYPE_SOLID_RECTANGLE;
+
+                return 6;
+            }
+
+            const float width = (float)texture_width;
+            const float height = (float)texture_height;
+
+            render_command->Command.Rectangle.TexturePosition.X =
+                a.uv.x * width;
+
+            render_command->Command.Rectangle.TexturePosition.Y =
+                a.uv.y * height;
+
+            render_command->Command.Rectangle.TextureSize.Width =
+                (c.uv.x - a.uv.x) * width;
+
+            render_command->Command.Rectangle.TextureSize.Height =
+                (c.uv.y - a.uv.y) * height;
+
+            render_command->Type = texture_format == ImTextureFormat_Alpha8
+                ? NAIVE_SWR_RENDER_TYPE_ALPHA8_RECTANGLE
+                : NAIVE_SWR_RENDER_TYPE_RGBA32_RECTANGLE;
+
+            return 6;
+        }
+    }
+
+    /*
+     * Rectangle recognition failed, so process the first triangle.
+     */
+    const ImDrawVert* vertices[3] =
+    {
+        &vertex_buffer[index_buffer[0]],
+        &vertex_buffer[index_buffer[1]],
+        &vertex_buffer[index_buffer[2]]
+    };
+
+    for (uint32_t i = 0; i < 3; ++i)
+    {
+        render_command->Command.Triangle.Positions[i].X =
+            vertices[i]->pos.x;
+
+        render_command->Command.Triangle.Positions[i].Y =
+            vertices[i]->pos.y;
+
+        render_command->Command.Triangle.Colors[i] =
+            naive_swr_color_from_imgui(vertices[i]->col);
+    }
+
+    const float area =
+        (vertices[1]->pos.x - vertices[0]->pos.x) *
+        (vertices[2]->pos.y - vertices[0]->pos.y) -
+        (vertices[1]->pos.y - vertices[0]->pos.y) *
+        (vertices[2]->pos.x - vertices[0]->pos.x);
+
+    const bool fully_transparent =
+        render_command->Command.Triangle.Colors[0].Alpha == 0 &&
+        render_command->Command.Triangle.Colors[1].Alpha == 0 &&
+        render_command->Command.Triangle.Colors[2].Alpha == 0;
+
+    if (area == 0.0f || fully_transparent)
+    {
+        render_command->Type = NAIVE_SWR_RENDER_TYPE_SKIPPED;
+        return 3;
+    }
+
+    const bool texture_is_white =
+        naive_swr_is_white_texture_coordinate(
+            vertices[0]->uv, white_texture_coordinate) &&
+        naive_swr_is_white_texture_coordinate(
+            vertices[1]->uv, white_texture_coordinate) &&
+        naive_swr_is_white_texture_coordinate(
+            vertices[2]->uv, white_texture_coordinate);
+
+    if (texture_is_white)
+    {
+        render_command->Type = NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE;
+
+        return 3;
+    }
+
+    for (uint32_t i = 0; i < 3; ++i)
+    {
+        render_command->Command.Triangle.TextureCoordinates[i].U =
+            vertices[i]->uv.x;
+
+        render_command->Command.Triangle.TextureCoordinates[i].V =
+            vertices[i]->uv.y;
+    }
+
+    render_command->Type = texture_format == ImTextureFormat_Alpha8
+        ? NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE
+        : NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE;
+
+    return 3;
+}
+
+#endif // !IMGUI_DISABLE
+
 #ifndef IMGUI_DISABLE
 #include "imgui_impl_gdi.h"
 
@@ -138,468 +345,792 @@ IMGUI_IMPL_API void ImGui_ImplGDI_NewFrame()
 
 }
 
-static bool ImGui_ImplGDI_RenderDrawRectangle(HDC hdc, HDC solid_alpha_dev_ctx_handle, ImU32* solid_alpha_pixel, const int& width, const int& height, const ImVec4& clip_rect, const ImDrawVert* v1, const ImDrawVert* v2, const ImDrawVert* v3, const ImDrawVert* v4, const ImDrawVert* v5, const ImDrawVert* v6)
+static inline int ImGui_ImplGDI_Mul255(int a, int b)
 {
-    if (!hdc || width <= 0 || height <= 0)
-        return false;
+    return (a * b + 127) / 255;
+}
 
-    const ImDrawVert* verts[6] = { v1, v2, v3, v4, v5, v6 };
+static inline ImU32 ImGui_ImplGDI_PackFramebufferColor(
+    int red,
+    int green,
+    int blue,
+    int alpha)
+{
+    red = ::InternalClamp(red, 0, 255);
+    green = ::InternalClamp(green, 0, 255);
+    blue = ::InternalClamp(blue, 0, 255);
+    alpha = ::InternalClamp(alpha, 0, 255);
 
-    for (int i = 0; i < 6; i++)
+    // 32-bit GDI DIB memory order: B, G, R, A.
+    return ((ImU32)alpha << 24) |
+        ((ImU32)red << 16) |
+        ((ImU32)green << 8) |
+        ((ImU32)blue << 0);
+}
+
+static inline void ImGui_ImplGDI_UnpackFramebufferColor(
+    ImU32 color,
+    int& red,
+    int& green,
+    int& blue,
+    int& alpha)
+{
+    blue = (color >> 0) & 0xFF;
+    green = (color >> 8) & 0xFF;
+    red = (color >> 16) & 0xFF;
+    alpha = (color >> 24) & 0xFF;
+}
+
+static inline void ImGui_ImplGDI_BlendOver(
+    ImU32* destination,
+    int source_red,
+    int source_green,
+    int source_blue,
+    int source_alpha)
+{
+    if (source_alpha <= 0)
+        return;
+
+    if (source_alpha >= 255)
     {
-        if (!verts[i])
-            return false;
+        *destination = ImGui_ImplGDI_PackFramebufferColor(
+            source_red,
+            source_green,
+            source_blue,
+            255);
+
+        return;
     }
 
-    const float eps = 0.01f;
+    int destination_red;
+    int destination_green;
+    int destination_blue;
+    int destination_alpha;
 
-    auto near_float = [eps](float a, float b) -> bool
+    ImGui_ImplGDI_UnpackFramebufferColor(
+        *destination,
+        destination_red,
+        destination_green,
+        destination_blue,
+        destination_alpha);
+
+    const int inverse_alpha = 255 - source_alpha;
+
+    const int output_red =
+        (source_red * source_alpha +
+            destination_red * inverse_alpha + 127) / 255;
+
+    const int output_green =
+        (source_green * source_alpha +
+            destination_green * inverse_alpha + 127) / 255;
+
+    const int output_blue =
+        (source_blue * source_alpha +
+            destination_blue * inverse_alpha + 127) / 255;
+
+    *destination = ImGui_ImplGDI_PackFramebufferColor(
+        output_red,
+        output_green,
+        output_blue,
+        255);
+}
+
+static bool ImGui_ImplGDI_ClipPixelBounds(
+    int& x0,
+    int& y0,
+    int& x1,
+    int& y1,
+    int framebuffer_width,
+    int framebuffer_height,
+    const ImVec4& clip_rect)
+{
+    const int clip_x0 = (int)ceilf(clip_rect.x - 0.5f);
+    const int clip_y0 = (int)ceilf(clip_rect.y - 0.5f);
+    const int clip_x1 = (int)ceilf(clip_rect.z - 0.5f);
+    const int clip_y1 = (int)ceilf(clip_rect.w - 0.5f);
+
+    if (x0 < clip_x0)
+        x0 = clip_x0;
+
+    if (y0 < clip_y0)
+        y0 = clip_y0;
+
+    if (x1 > clip_x1)
+        x1 = clip_x1;
+
+    if (y1 > clip_y1)
+        y1 = clip_y1;
+
+    x0 = ::InternalClamp(x0, 0, framebuffer_width);
+    y0 = ::InternalClamp(y0, 0, framebuffer_height);
+    x1 = ::InternalClamp(x1, 0, framebuffer_width);
+    y1 = ::InternalClamp(y1, 0, framebuffer_height);
+
+    return x0 < x1 && y0 < y1;
+}
+
+static void ImGui_ImplGDI_RenderSolidRectangleCommand(
+    HDC hdc,
+    HDC solid_alpha_dev_ctx_handle,
+    ImU32* solid_alpha_pixel,
+    int framebuffer_width,
+    int framebuffer_height,
+    const ImVec4& clip_rect,
+    const NAIVE_SWR_RENDER_COMMAND& render_command)
+{
+    const auto& rectangle = render_command.Command.Rectangle;
+    const NAIVE_SWR_COLOR& color = rectangle.Color;
+
+    if (color.Alpha == 0)
+        return;
+
+    float left = rectangle.Position.X;
+    float top = rectangle.Position.Y;
+    float right = left + rectangle.Size.Width;
+    float bottom = top + rectangle.Size.Height;
+
+    if (right < left)
     {
-        return fabsf(a - b) <= eps;
-    };
-
-    // Must be the same color, otherwise it's not a simple rectangle that FillRect can handle.
-    ImU32 col = verts[0]->col;
-
-    for (int i = 1; i < 6; i++)
-    {
-        if (verts[i]->col != col)
-            return false;
+        const float temporary = left;
+        left = right;
+        right = temporary;
     }
 
-    // Must have the same UV, otherwise it's not a simple rectangle.
-    // Text glyphs and image quads usually have different UVs and cannot be treated as solid rectangles.
-    ImVec2 uv = verts[0]->uv;
-
-    for (int i = 1; i < 6; i++)
+    if (bottom < top)
     {
-        if (!near_float(verts[i]->uv.x, uv.x) || !near_float(verts[i]->uv.y, uv.y))
-            return false;
+        const float temporary = top;
+        top = bottom;
+        bottom = temporary;
     }
 
-    // Extract unique positions. A rectangle made of two triangles should have 4 unique vertices.
+    int x0 = (int)ceilf(left - 0.5f);
+    int y0 = (int)ceilf(top - 0.5f);
+    int x1 = (int)ceilf(right - 0.5f);
+    int y1 = (int)ceilf(bottom - 0.5f);
 
-    ImVec2 unique_pos[4];
-    int unique_count[4] = {};
-    int unique_n = 0;
-
-    for (int i = 0; i < 6; i++)
+    if (!ImGui_ImplGDI_ClipPixelBounds(
+        x0,
+        y0,
+        x1,
+        y1,
+        framebuffer_width,
+        framebuffer_height,
+        clip_rect))
     {
-        const ImVec2& p = verts[i]->pos;
-
-        bool found = false;
-
-        for (int j = 0; j < unique_n; j++)
-        {
-            if (near_float(unique_pos[j].x, p.x) && near_float(unique_pos[j].y, p.y))
-            {
-                unique_count[j]++;
-                found = true;
-                break;
-            }
-        }
-
-        if (!found)
-        {
-            if (unique_n >= 4)
-                return false;
-
-            unique_pos[unique_n] = p;
-            unique_count[unique_n] = 1;
-            unique_n++;
-        }
+        return;
     }
 
-    if (unique_n != 4)
-        return false;
+    RECT rectangle_handle;
+    rectangle_handle.left = x0;
+    rectangle_handle.top = y0;
+    rectangle_handle.right = x1;
+    rectangle_handle.bottom = y1;
 
-    // The repeat count of the two triangles in a regular rectangle should be 2,2,1,1.
-
-    int count_1 = 0;
-    int count_2 = 0;
-
-    for (int i = 0; i < 4; i++)
+    if (color.Alpha == 255)
     {
-        if (unique_count[i] == 1)
-            count_1++;
-        else if (unique_count[i] == 2)
-            count_2++;
-        else
-            return false;
-    }
+        const COLORREF previous_color = ::SetDCBrushColor(
+            hdc,
+            RGB(color.Red, color.Green, color.Blue));
 
-    if (count_1 != 2 || count_2 != 2)
-        return false;
+        ::FillRect(
+            hdc,
+            &rectangle_handle,
+            (HBRUSH)::GetStockObject(DC_BRUSH));
 
-    // Calculate the bounding box of the 4 unique points.
-
-    float min_x = unique_pos[0].x;
-    float max_x = unique_pos[0].x;
-    float min_y = unique_pos[0].y;
-    float max_y = unique_pos[0].y;
-
-    for (int i = 1; i < 4; i++)
-    {
-        if (unique_pos[i].x < min_x) min_x = unique_pos[i].x;
-        if (unique_pos[i].x > max_x) max_x = unique_pos[i].x;
-        if (unique_pos[i].y < min_y) min_y = unique_pos[i].y;
-        if (unique_pos[i].y > max_y) max_y = unique_pos[i].y;
-    }
-
-    if (max_x <= min_x || max_y <= min_y)
-        return true;
-
-    // Check if the 4 unique points are exactly the 4 corners of the bounding box.
-
-    int corner_mask = 0;
-
-    for (int i = 0; i < 4; i++)
-    {
-        int ix = -1;
-        int iy = -1;
-
-        if (near_float(unique_pos[i].x, min_x))
-            ix = 0;
-        else if (near_float(unique_pos[i].x, max_x))
-            ix = 1;
-        else
-            return false;
-
-        if (near_float(unique_pos[i].y, min_y))
-            iy = 0;
-        else if (near_float(unique_pos[i].y, max_y))
-            iy = 1;
-        else
-            return false;
-
-        int bit = iy * 2 + ix;
-
-        if (corner_mask & (1 << bit))
-            return false;
-
-        corner_mask |= (1 << bit);
-    }
-
-    if (corner_mask != 0x0F)
-        return false;
-
-    // Convert to pixel RECT. We use the same x+0.5/y+0.5 pixel center rule as the software triangle renderer to avoid off-by-one issues.
-
-    int x0 = (int)ceilf(min_x - 0.5f);
-    int y0 = (int)ceilf(min_y - 0.5f);
-    int x1 = (int)ceilf(max_x - 0.5f);
-    int y1 = (int)ceilf(max_y - 0.5f);
-
-    int clip_x0 = (int)ceilf(clip_rect.x - 0.5f);
-    int clip_y0 = (int)ceilf(clip_rect.y - 0.5f);
-    int clip_x1 = (int)ceilf(clip_rect.z - 0.5f);
-    int clip_y1 = (int)ceilf(clip_rect.w - 0.5f);
-
-    if (x0 < clip_x0) x0 = clip_x0;
-    if (y0 < clip_y0) y0 = clip_y0;
-    if (x1 > clip_x1) x1 = clip_x1;
-    if (y1 > clip_y1) y1 = clip_y1;
-
-    x0 = ::InternalClamp(x0, 0, width);
-    y0 = ::InternalClamp(y0, 0, height);
-    x1 = ::InternalClamp(x1, 0, width);
-    y1 = ::InternalClamp(y1, 0, height);
-
-    if (x0 >= x1 || y0 >= y1)
-        return true;
-
-    // Extract RGBA components from ImGui's vertex color format.
-
-    int r = (col >> IM_COL32_R_SHIFT) & 0xff;
-    int g = (col >> IM_COL32_G_SHIFT) & 0xff;
-    int b = (col >> IM_COL32_B_SHIFT) & 0xff;
-    int a = (col >> IM_COL32_A_SHIFT) & 0xff;
-
-    if (a <= 0)
-        return true;
-
-    RECT rect;
-    rect.left = x0;
-    rect.top = y0;
-    rect.right = x1;
-    rect.bottom = y1;
-
-    // Fast path for fully opaque rectangles. No alpha blending needed.
-    if (a >= 255)
-    {
-        COLORREF previous_color = ::SetDCBrushColor(hdc, RGB(r, g, b));
-        ::FillRect(hdc, &rect, (HBRUSH)::GetStockObject(DC_BRUSH));
         ::SetDCBrushColor(hdc, previous_color);
-        return true;
+        return;
     }
 
-    // Fast path for semi-transparent rectangles.
-    
-    // The 32-bit BI_RGB DIB memory byte order is B,G,R,X.
-    // You can write the uint32_t value as 0x00RRGGBB.
     *solid_alpha_pixel =
-        ((ImU32)r << 16) |
-        ((ImU32)g << 8) |
-        ((ImU32)b << 0);
+        ((ImU32)color.Red << 16) |
+        ((ImU32)color.Green << 8) |
+        ((ImU32)color.Blue << 0);
 
     BLENDFUNCTION blend_function = {};
     blend_function.BlendOp = AC_SRC_OVER;
     blend_function.BlendFlags = 0;
-    blend_function.SourceConstantAlpha = (BYTE)a;
+    blend_function.SourceConstantAlpha = color.Alpha;
     blend_function.AlphaFormat = 0;
-    bool result = ::GdiAlphaBlend(hdc, x0, y0, x1 - x0, y1 - y0, solid_alpha_dev_ctx_handle, 0, 0, 1, 1, blend_function);
 
-    return result;
+    ::GdiAlphaBlend(
+        hdc,
+        x0,
+        y0,
+        x1 - x0,
+        y1 - y0,
+        solid_alpha_dev_ctx_handle,
+        0,
+        0,
+        1,
+        1,
+        blend_function);
 }
 
-static void ImGui_ImplGDI_RenderDrawTriangle(ImU32* pixel_buffer, const int& width, const int& height, const ImVec4& clip_rect, const ImDrawVert* v1, const ImDrawVert* v2, const ImDrawVert* v3, ImGui_ImplGDI_Texture* texture)
+template <NAIVE_SWR_RENDER_TYPE RenderType>
+static void ImGui_ImplGDI_RenderTexturedRectangleCommand(
+    ImU32* pixel_buffer,
+    int framebuffer_width,
+    int framebuffer_height,
+    const ImVec4& clip_rect,
+    const ImGui_ImplGDI_Texture* texture,
+    const NAIVE_SWR_RENDER_COMMAND& render_command)
 {
-    if (!pixel_buffer || width <= 0 || height <= 0)
+    IM_ASSERT(
+        RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_RECTANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_RGBA32_RECTANGLE);
+
+    if (!pixel_buffer ||
+        !texture ||
+        !texture->Pixels ||
+        texture->Width <= 0 ||
+        texture->Height <= 0)
+    {
         return;
+    }
 
-    if (!v1 || !v2 || !v3)
+    const auto& rectangle = render_command.Command.Rectangle;
+    const NAIVE_SWR_COLOR& color = rectangle.Color;
+
+    if (color.Alpha == 0 ||
+        rectangle.Size.Width == 0.0f ||
+        rectangle.Size.Height == 0.0f)
+    {
         return;
+    }
 
-    // If the texture is not valid, we will treat it as a pure white texture.
-    const bool has_texture = texture && texture->Pixels && texture->Width > 0 && texture->Height > 0;
+    const float destination_x0 = rectangle.Position.X;
+    const float destination_y0 = rectangle.Position.Y;
+    const float destination_x1 =
+        destination_x0 + rectangle.Size.Width;
+    const float destination_y1 =
+        destination_y0 + rectangle.Size.Height;
 
-    // If your pixel_buffer is in the same IM_COL32 format as ImGui, set this to false.
-    // GDI 32-bit DIB is typically BGRA, so we set this to true.
-    const bool framebuffer_is_gdi_bgra = true;
+    const float left =
+        destination_x0 < destination_x1
+        ? destination_x0
+        : destination_x1;
 
-    auto mul255 = [](int a, int b) -> int
+    const float right =
+        destination_x0 > destination_x1
+        ? destination_x0
+        : destination_x1;
+
+    const float top =
+        destination_y0 < destination_y1
+        ? destination_y0
+        : destination_y1;
+
+    const float bottom =
+        destination_y0 > destination_y1
+        ? destination_y0
+        : destination_y1;
+
+    int x0 = (int)ceilf(left - 0.5f);
+    int y0 = (int)ceilf(top - 0.5f);
+    int x1 = (int)ceilf(right - 0.5f);
+    int y1 = (int)ceilf(bottom - 0.5f);
+
+    if (!ImGui_ImplGDI_ClipPixelBounds(
+        x0,
+        y0,
+        x1,
+        y1,
+        framebuffer_width,
+        framebuffer_height,
+        clip_rect))
     {
-        return (a * b + 127) / 255;
-    };
+        return;
+    }
 
-    auto edge = [](const ImVec2& a, const ImVec2& b, float px, float py) -> float
+    const float texture_step_x =
+        rectangle.TextureSize.Width / rectangle.Size.Width;
+
+    const float texture_step_y =
+        rectangle.TextureSize.Height / rectangle.Size.Height;
+
+    const float texture_x_start =
+        rectangle.TexturePosition.X +
+        (((float)x0 + 0.5f) - rectangle.Position.X) *
+        texture_step_x;
+
+    float texture_y =
+        rectangle.TexturePosition.Y +
+        (((float)y0 + 0.5f) - rectangle.Position.Y) *
+        texture_step_y;
+
+    const uint8_t* texture_bytes =
+        reinterpret_cast<const uint8_t*>(texture->Pixels);
+
+    for (int y = y0; y < y1; ++y)
     {
-        return (px - a.x) * (b.y - a.y) - (py - a.y) * (b.x - a.x);
-    };
+        int texture_y_integer = (int)texture_y;
 
-    auto is_top_left = [](const ImVec2& a, const ImVec2& b) -> bool
-    {
-        float dx = b.x - a.x;
-        float dy = b.y - a.y;
+        texture_y_integer = ::InternalClamp(
+            texture_y_integer,
+            0,
+            texture->Height - 1);
 
-        // This rule is to avoid double blending when two triangles share an edge, which can cause a darker diagonal line in semi-transparent rectangles.
-        return (dy < 0.0f) || (dy == 0.0f && dx > 0.0f);
-    };
+        float texture_x = texture_x_start;
 
-    auto unpack_imgui_color = [](ImU32 c, int& r, int& g, int& b, int& a)
-    {
-        r = (c >> IM_COL32_R_SHIFT) & 0xff;
-        g = (c >> IM_COL32_G_SHIFT) & 0xff;
-        b = (c >> IM_COL32_B_SHIFT) & 0xff;
-        a = (c >> IM_COL32_A_SHIFT) & 0xff;
-    };
-
-    auto unpack_framebuffer_color = [framebuffer_is_gdi_bgra](ImU32 c, int& r, int& g, int& b, int& a)
-    {
-        if (framebuffer_is_gdi_bgra)
+        for (int x = x0; x < x1; ++x)
         {
-            // uint32_t value: 0xAARRGGBB
-            // memory bytes:   BB GG RR AA
-            b = (c >> 0) & 0xff;
-            g = (c >> 8) & 0xff;
-            r = (c >> 16) & 0xff;
-            a = (c >> 24) & 0xff;
-        }
-        else
-        {
-            r = (c >> IM_COL32_R_SHIFT) & 0xff;
-            g = (c >> IM_COL32_G_SHIFT) & 0xff;
-            b = (c >> IM_COL32_B_SHIFT) & 0xff;
-            a = (c >> IM_COL32_A_SHIFT) & 0xff;
-        }
-    };
+            int texture_x_integer = (int)texture_x;
 
-    auto pack_framebuffer_color = [framebuffer_is_gdi_bgra](int r, int g, int b, int a) -> ImU32
+            texture_x_integer = ::InternalClamp(
+                texture_x_integer,
+                0,
+                texture->Width - 1);
+
+            const size_t texture_index =
+                (size_t)texture_y_integer * texture->Width +
+                texture_x_integer;
+
+            int source_red;
+            int source_green;
+            int source_blue;
+            int source_alpha;
+
+            if (RenderType ==
+                NAIVE_SWR_RENDER_TYPE_ALPHA8_RECTANGLE)
+            {
+                const int texture_alpha =
+                    texture_bytes[texture_index];
+
+                source_red = color.Red;
+                source_green = color.Green;
+                source_blue = color.Blue;
+                source_alpha = ImGui_ImplGDI_Mul255(
+                    texture_alpha,
+                    color.Alpha);
+            }
+            else
+            {
+                const uint8_t* texel =
+                    texture_bytes + texture_index * 4;
+
+                source_red = ImGui_ImplGDI_Mul255(
+                    texel[0],
+                    color.Red);
+
+                source_green = ImGui_ImplGDI_Mul255(
+                    texel[1],
+                    color.Green);
+
+                source_blue = ImGui_ImplGDI_Mul255(
+                    texel[2],
+                    color.Blue);
+
+                source_alpha = ImGui_ImplGDI_Mul255(
+                    texel[3],
+                    color.Alpha);
+            }
+
+            ImU32* destination =
+                pixel_buffer + (size_t)y * framebuffer_width + x;
+
+            ImGui_ImplGDI_BlendOver(
+                destination,
+                source_red,
+                source_green,
+                source_blue,
+                source_alpha);
+
+            texture_x += texture_step_x;
+        }
+
+        texture_y += texture_step_y;
+    }
+}
+
+static inline float ImGui_ImplGDI_Edge(
+    const NAIVE_SWR_POINT& a,
+    const NAIVE_SWR_POINT& b,
+    float x,
+    float y)
+{
+    return (x - a.X) * (b.Y - a.Y) -
+        (y - a.Y) * (b.X - a.X);
+}
+
+static inline bool ImGui_ImplGDI_IsTopLeft(
+    const NAIVE_SWR_POINT& a,
+    const NAIVE_SWR_POINT& b)
+{
+    const float delta_x = b.X - a.X;
+    const float delta_y = b.Y - a.Y;
+
+    return delta_y < 0.0f ||
+        (delta_y == 0.0f && delta_x > 0.0f);
+}
+
+template <NAIVE_SWR_RENDER_TYPE RenderType>
+static void ImGui_ImplGDI_RenderTriangleCommand(
+    ImU32* pixel_buffer,
+    int framebuffer_width,
+    int framebuffer_height,
+    const ImVec4& clip_rect,
+    const ImGui_ImplGDI_Texture* texture,
+    const NAIVE_SWR_RENDER_COMMAND& render_command)
+{
+    IM_ASSERT(
+        RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE);
+
+    if (!pixel_buffer ||
+        framebuffer_width <= 0 ||
+        framebuffer_height <= 0)
     {
-        r = ::InternalClamp(r, 0, 255);
-        g = ::InternalClamp(g, 0, 255);
-        b = ::InternalClamp(b, 0, 255);
-        a = ::InternalClamp(a, 0, 255);
+        return;
+    }
 
-        if (framebuffer_is_gdi_bgra)
-        {
-            // GDI DIB BGRA memory layout.
-            return ((ImU32)a << 24) |
-                ((ImU32)r << 16) |
-                ((ImU32)g << 8) |
-                ((ImU32)b << 0);
-        }
-        else
-        {
-            return IM_COL32(r, g, b, a);
-        }
-    };
-
-    auto blend_over = [&](ImU32* dst, int src_r, int src_g, int src_b, int src_a)
+    if (RenderType != NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE)
     {
-        if (src_a <= 0)
+        if (!texture ||
+            !texture->Pixels ||
+            texture->Width <= 0 ||
+            texture->Height <= 0)
+        {
             return;
-
-        if (src_a >= 255)
-        {
-            *dst = pack_framebuffer_color(src_r, src_g, src_b, 255);
-            return;
         }
+    }
 
-        int dst_r, dst_g, dst_b, dst_a;
-        unpack_framebuffer_color(*dst, dst_r, dst_g, dst_b, dst_a);
+    const auto& triangle = render_command.Command.Triangle;
 
-        int inv_a = 255 - src_a;
+    const NAIVE_SWR_POINT& point_1 = triangle.Positions[0];
+    const NAIVE_SWR_POINT& point_2 = triangle.Positions[1];
+    const NAIVE_SWR_POINT& point_3 = triangle.Positions[2];
 
-        int out_r = (src_r * src_a + dst_r * inv_a + 127) / 255;
-        int out_g = (src_g * src_a + dst_g * inv_a + 127) / 255;
-        int out_b = (src_b * src_a + dst_b * inv_a + 127) / 255;
-
-        // For normal GDI framebuffer, we can just set alpha to 255.
-        *dst = pack_framebuffer_color(out_r, out_g, out_b, 255);
-    };
-
-    const ImVec2& p1 = v1->pos;
-    const ImVec2& p2 = v2->pos;
-    const ImVec2& p3 = v3->pos;
-
-    float area = edge(p1, p2, p3.x, p3.y);
+    const float area = ImGui_ImplGDI_Edge(
+        point_1,
+        point_2,
+        point_3.X,
+        point_3.Y);
 
     if (area > -0.000001f && area < 0.000001f)
         return;
 
-    float inv_area = 1.0f / area;
+    const float inverse_area = 1.0f / area;
 
-    float min_x = p1.x;
-    float min_y = p1.y;
-    float max_x = p1.x;
-    float max_y = p1.y;
+    float minimum_x = point_1.X;
+    float minimum_y = point_1.Y;
+    float maximum_x = point_1.X;
+    float maximum_y = point_1.Y;
 
-    if (p2.x < min_x) min_x = p2.x;
-    if (p3.x < min_x) min_x = p3.x;
+    if (point_2.X < minimum_x) minimum_x = point_2.X;
+    if (point_3.X < minimum_x) minimum_x = point_3.X;
+    if (point_2.Y < minimum_y) minimum_y = point_2.Y;
+    if (point_3.Y < minimum_y) minimum_y = point_3.Y;
 
-    if (p2.y < min_y) min_y = p2.y;
-    if (p3.y < min_y) min_y = p3.y;
+    if (point_2.X > maximum_x) maximum_x = point_2.X;
+    if (point_3.X > maximum_x) maximum_x = point_3.X;
+    if (point_2.Y > maximum_y) maximum_y = point_2.Y;
+    if (point_3.Y > maximum_y) maximum_y = point_3.Y;
 
-    if (p2.x > max_x) max_x = p2.x;
-    if (p3.x > max_x) max_x = p3.x;
+    int x0 = (int)floorf(minimum_x);
+    int y0 = (int)floorf(minimum_y);
+    int x1 = (int)ceilf(maximum_x);
+    int y1 = (int)ceilf(maximum_y);
 
-    if (p2.y > max_y) max_y = p2.y;
-    if (p3.y > max_y) max_y = p3.y;
-
-    // Triangle bounding box.
-
-    int x0 = (int)floorf(min_x);
-    int y0 = (int)floorf(min_y);
-    int x1 = (int)ceilf(max_x);
-    int y1 = (int)ceilf(max_y);
-
-    // The clip_rect is in pixel boundary; here we clip with pixel center x+0.5/y+0.5.
-
-    int clip_x0 = (int)ceilf(clip_rect.x - 0.5f);
-    int clip_y0 = (int)ceilf(clip_rect.y - 0.5f);
-    int clip_x1 = (int)ceilf(clip_rect.z - 0.5f);
-    int clip_y1 = (int)ceilf(clip_rect.w - 0.5f);
-
-    if (x0 < clip_x0) x0 = clip_x0;
-    if (y0 < clip_y0) y0 = clip_y0;
-    if (x1 > clip_x1) x1 = clip_x1;
-    if (y1 > clip_y1) y1 = clip_y1;
-
-    x0 = ::InternalClamp(x0, 0, width);
-    y0 = ::InternalClamp(y0, 0, height);
-    x1 = ::InternalClamp(x1, 0, width);
-    y1 = ::InternalClamp(y1, 0, height);
-
-    if (x0 >= x1 || y0 >= y1)
-        return;
-
-    int c1_r, c1_g, c1_b, c1_a;
-    int c2_r, c2_g, c2_b, c2_a;
-    int c3_r, c3_g, c3_b, c3_a;
-
-    unpack_imgui_color(v1->col, c1_r, c1_g, c1_b, c1_a);
-    unpack_imgui_color(v2->col, c2_r, c2_g, c2_b, c2_a);
-    unpack_imgui_color(v3->col, c3_r, c3_g, c3_b, c3_a);
-
-    bool tl1 = is_top_left(p2, p3);
-    bool tl2 = is_top_left(p3, p1);
-    bool tl3 = is_top_left(p1, p2);
-
-    for (int y = y0; y < y1; y++)
+    if (!ImGui_ImplGDI_ClipPixelBounds(
+        x0,
+        y0,
+        x1,
+        y1,
+        framebuffer_width,
+        framebuffer_height,
+        clip_rect))
     {
-        float py = (float)y + 0.5f;
+        return;
+    }
 
-        for (int x = x0; x < x1; x++)
+    const bool top_left_1 =
+        ImGui_ImplGDI_IsTopLeft(point_2, point_3);
+
+    const bool top_left_2 =
+        ImGui_ImplGDI_IsTopLeft(point_3, point_1);
+
+    const bool top_left_3 =
+        ImGui_ImplGDI_IsTopLeft(point_1, point_2);
+
+    const float edge_1_step_x = point_3.Y - point_2.Y;
+    const float edge_2_step_x = point_1.Y - point_3.Y;
+    const float edge_3_step_x = point_2.Y - point_1.Y;
+
+    const float edge_1_step_y = -(point_3.X - point_2.X);
+    const float edge_2_step_y = -(point_1.X - point_3.X);
+    const float edge_3_step_y = -(point_2.X - point_1.X);
+
+    const float first_pixel_x = (float)x0 + 0.5f;
+    const float first_pixel_y = (float)y0 + 0.5f;
+
+    float edge_1_row = ImGui_ImplGDI_Edge(
+        point_2,
+        point_3,
+        first_pixel_x,
+        first_pixel_y);
+
+    float edge_2_row = ImGui_ImplGDI_Edge(
+        point_3,
+        point_1,
+        first_pixel_x,
+        first_pixel_y);
+
+    float edge_3_row = ImGui_ImplGDI_Edge(
+        point_1,
+        point_2,
+        first_pixel_x,
+        first_pixel_y);
+
+    const NAIVE_SWR_COLOR& color_1 = triangle.Colors[0];
+    const NAIVE_SWR_COLOR& color_2 = triangle.Colors[1];
+    const NAIVE_SWR_COLOR& color_3 = triangle.Colors[2];
+
+    const uint8_t* texture_bytes =
+        texture
+        ? reinterpret_cast<const uint8_t*>(texture->Pixels)
+        : nullptr;
+
+    for (int y = y0; y < y1; ++y)
+    {
+        float edge_1 = edge_1_row;
+        float edge_2 = edge_2_row;
+        float edge_3 = edge_3_row;
+
+        for (int x = x0; x < x1; ++x)
         {
-            float px = (float)x + 0.5f;
+            const float signed_edge_1 = edge_1 * area;
+            const float signed_edge_2 = edge_2 * area;
+            const float signed_edge_3 = edge_3 * area;
 
-            float e1 = edge(p2, p3, px, py);
-            float e2 = edge(p3, p1, px, py);
-            float e3 = edge(p1, p2, px, py);
+            const bool inside =
+                signed_edge_1 >= 0.0f &&
+                signed_edge_2 >= 0.0f &&
+                signed_edge_3 >= 0.0f &&
+                (signed_edge_1 != 0.0f || top_left_1) &&
+                (signed_edge_2 != 0.0f || top_left_2) &&
+                (signed_edge_3 != 0.0f || top_left_3);
 
-            // inside test which supports both clockwise and counter-clockwise winding.
-
-            float s1 = e1 * area;
-            float s2 = e2 * area;
-            float s3 = e3 * area;
-
-            if (s1 < 0.0f) continue;
-            if (s2 < 0.0f) continue;
-            if (s3 < 0.0f) continue;
-
-            // top-left rule to avoid unnecessary blending when two triangles share an edge.
-
-            if (s1 == 0.0f && !tl1) continue;
-            if (s2 == 0.0f && !tl2) continue;
-            if (s3 == 0.0f && !tl3) continue;
-
-            float w1 = e1 * inv_area;
-            float w2 = e2 * inv_area;
-            float w3 = e3 * inv_area;
-
-            float u = v1->uv.x * w1 + v2->uv.x * w2 + v3->uv.x * w3;
-            float v = v1->uv.y * w1 + v2->uv.y * w2 + v3->uv.y * w3;
-
-            int tex_r = 255;
-            int tex_g = 255;
-            int tex_b = 255;
-            int tex_a = 255;
-
-            if (has_texture)
+            if (inside)
             {
-                int tx = (int)(u * texture->Width);
-                int ty = (int)(v * texture->Height);
+                const float weight_1 = edge_1 * inverse_area;
+                const float weight_2 = edge_2 * inverse_area;
+                const float weight_3 = edge_3 * inverse_area;
 
-                tx = ::InternalClamp(tx, 0, texture->Width - 1);
-                ty = ::InternalClamp(ty, 0, texture->Height - 1);
+                int vertex_red = (int)(
+                    color_1.Red * weight_1 +
+                    color_2.Red * weight_2 +
+                    color_3.Red * weight_3 +
+                    0.5f);
 
-                ImU32 tex_col = texture->Pixels[ty * texture->Width + tx];
-                unpack_imgui_color(tex_col, tex_r, tex_g, tex_b, tex_a);
+                int vertex_green = (int)(
+                    color_1.Green * weight_1 +
+                    color_2.Green * weight_2 +
+                    color_3.Green * weight_3 +
+                    0.5f);
+
+                int vertex_blue = (int)(
+                    color_1.Blue * weight_1 +
+                    color_2.Blue * weight_2 +
+                    color_3.Blue * weight_3 +
+                    0.5f);
+
+                int vertex_alpha = (int)(
+                    color_1.Alpha * weight_1 +
+                    color_2.Alpha * weight_2 +
+                    color_3.Alpha * weight_3 +
+                    0.5f);
+
+                vertex_red =
+                    ::InternalClamp(vertex_red, 0, 255);
+
+                vertex_green =
+                    ::InternalClamp(vertex_green, 0, 255);
+
+                vertex_blue =
+                    ::InternalClamp(vertex_blue, 0, 255);
+
+                vertex_alpha =
+                    ::InternalClamp(vertex_alpha, 0, 255);
+
+                int source_red = vertex_red;
+                int source_green = vertex_green;
+                int source_blue = vertex_blue;
+                int source_alpha = vertex_alpha;
+
+                if (RenderType !=
+                    NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE)
+                {
+                    const float texture_u =
+                        triangle.TextureCoordinates[0].U * weight_1 +
+                        triangle.TextureCoordinates[1].U * weight_2 +
+                        triangle.TextureCoordinates[2].U * weight_3;
+
+                    const float texture_v =
+                        triangle.TextureCoordinates[0].V * weight_1 +
+                        triangle.TextureCoordinates[1].V * weight_2 +
+                        triangle.TextureCoordinates[2].V * weight_3;
+
+                    int texture_x =
+                        (int)(texture_u * texture->Width);
+
+                    int texture_y =
+                        (int)(texture_v * texture->Height);
+
+                    texture_x = ::InternalClamp(
+                        texture_x,
+                        0,
+                        texture->Width - 1);
+
+                    texture_y = ::InternalClamp(
+                        texture_y,
+                        0,
+                        texture->Height - 1);
+
+                    const size_t texture_index =
+                        (size_t)texture_y * texture->Width +
+                        texture_x;
+
+                    if (RenderType ==
+                        NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE)
+                    {
+                        const int texture_alpha =
+                            texture_bytes[texture_index];
+
+                        source_alpha = ImGui_ImplGDI_Mul255(
+                            texture_alpha,
+                            vertex_alpha);
+                    }
+                    else
+                    {
+                        const uint8_t* texel =
+                            texture_bytes + texture_index * 4;
+
+                        source_red = ImGui_ImplGDI_Mul255(
+                            texel[0],
+                            vertex_red);
+
+                        source_green = ImGui_ImplGDI_Mul255(
+                            texel[1],
+                            vertex_green);
+
+                        source_blue = ImGui_ImplGDI_Mul255(
+                            texel[2],
+                            vertex_blue);
+
+                        source_alpha = ImGui_ImplGDI_Mul255(
+                            texel[3],
+                            vertex_alpha);
+                    }
+                }
+
+                ImU32* destination =
+                    pixel_buffer + (size_t)y * framebuffer_width + x;
+
+                ImGui_ImplGDI_BlendOver(
+                    destination,
+                    source_red,
+                    source_green,
+                    source_blue,
+                    source_alpha);
             }
 
-            int vert_r = (int)(c1_r * w1 + c2_r * w2 + c3_r * w3 + 0.5f);
-            int vert_g = (int)(c1_g * w1 + c2_g * w2 + c3_g * w3 + 0.5f);
-            int vert_b = (int)(c1_b * w1 + c2_b * w2 + c3_b * w3 + 0.5f);
-            int vert_a = (int)(c1_a * w1 + c2_a * w2 + c3_a * w3 + 0.5f);
-
-            vert_r = ::InternalClamp(vert_r, 0, 255);
-            vert_g = ::InternalClamp(vert_g, 0, 255);
-            vert_b = ::InternalClamp(vert_b, 0, 255);
-            vert_a = ::InternalClamp(vert_a, 0, 255);
-
-            // ImGui rendering looks like this:
-            // final_rgb = texture_rgb * vertex_rgb
-            // final_a   = texture_a   * vertex_a
-
-            int src_r = mul255(tex_r, vert_r);
-            int src_g = mul255(tex_g, vert_g);
-            int src_b = mul255(tex_b, vert_b);
-            int src_a = mul255(tex_a, vert_a);
-
-            ImU32* dst = pixel_buffer + y * width + x;
-            blend_over(dst, src_r, src_g, src_b, src_a);
+            edge_1 += edge_1_step_x;
+            edge_2 += edge_2_step_x;
+            edge_3 += edge_3_step_x;
         }
+
+        edge_1_row += edge_1_step_y;
+        edge_2_row += edge_2_step_y;
+        edge_3_row += edge_3_step_y;
+    }
+}
+
+static void ImGui_ImplGDI_RenderCommand(
+    HDC hdc,
+    HDC solid_alpha_dev_ctx_handle,
+    ImU32* solid_alpha_pixel,
+    ImU32* pixel_buffer,
+    int framebuffer_width,
+    int framebuffer_height,
+    const ImVec4& clip_rect,
+    const ImGui_ImplGDI_Texture* texture,
+    const NAIVE_SWR_RENDER_COMMAND& render_command)
+{
+    switch (render_command.Type)
+    {
+    case NAIVE_SWR_RENDER_TYPE_SKIPPED:
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_SOLID_RECTANGLE:
+        ImGui_ImplGDI_RenderSolidRectangleCommand(
+            hdc,
+            solid_alpha_dev_ctx_handle,
+            solid_alpha_pixel,
+            framebuffer_width,
+            framebuffer_height,
+            clip_rect,
+            render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_ALPHA8_RECTANGLE:
+        ImGui_ImplGDI_RenderTexturedRectangleCommand<
+            NAIVE_SWR_RENDER_TYPE_ALPHA8_RECTANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                texture,
+                render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_RGBA32_RECTANGLE:
+        ImGui_ImplGDI_RenderTexturedRectangleCommand<
+            NAIVE_SWR_RENDER_TYPE_RGBA32_RECTANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                texture,
+                render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE:
+        ImGui_ImplGDI_RenderTriangleCommand<
+            NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                nullptr,
+                render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE:
+        ImGui_ImplGDI_RenderTriangleCommand<
+            NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                texture,
+                render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE:
+        ImGui_ImplGDI_RenderTriangleCommand<
+            NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                texture,
+                render_command);
+        return;
+
+    default:
+        IM_ASSERT(false && "Unknown Naive Software Renderer command type.");
+        return;
     }
 }
 
@@ -713,29 +1244,30 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(ImDrawData* draw_data, void* fb
                 const ImDrawVert* vtx_buffer = draw_list->VtxBuffer.Data + pcmd->VtxOffset;
                 const ImDrawIdx* idx_buffer = draw_list->IdxBuffer.Data + pcmd->IdxOffset;
 
+                ImGui_ImplGDI_Texture* texture = (ImGui_ImplGDI_Texture*)pcmd->GetTexID();
+
                 for (unsigned int elem_i = 0; elem_i < pcmd->ElemCount;)
                 {
-                    if (elem_i + 6 <= pcmd->ElemCount)
-                    {
-                        const ImDrawVert* v1 = &vtx_buffer[idx_buffer[elem_i + 0]];
-                        const ImDrawVert* v2 = &vtx_buffer[idx_buffer[elem_i + 1]];
-                        const ImDrawVert* v3 = &vtx_buffer[idx_buffer[elem_i + 2]];
-                        const ImDrawVert* v4 = &vtx_buffer[idx_buffer[elem_i + 3]];
-                        const ImDrawVert* v5 = &vtx_buffer[idx_buffer[elem_i + 4]];
-                        const ImDrawVert* v6 = &vtx_buffer[idx_buffer[elem_i + 5]];
-                        if (ImGui_ImplGDI_RenderDrawRectangle(hdc, solid_alpha_dev_ctx_handle, solid_alpha_pixel, fb_width, fb_height, pcmd->ClipRect, v1, v2, v3, v4, v5, v6))
-                        {
-                            elem_i += 6;
-                            continue;
-                        }
-                    }
+                    NAIVE_SWR_RENDER_COMMAND render_command;
+                    elem_i += naive_swr_make_render_command(
+                        vtx_buffer,
+                        idx_buffer + elem_i,
+                        pcmd->ElemCount - elem_i,
+                        ImTextureFormat_RGBA32,
+                        texture->Width,
+                        texture->Height,
+                        &render_command);
 
-                    const ImDrawVert* v1 = &vtx_buffer[idx_buffer[elem_i + 0]];
-                    const ImDrawVert* v2 = &vtx_buffer[idx_buffer[elem_i + 1]];
-                    const ImDrawVert* v3 = &vtx_buffer[idx_buffer[elem_i + 2]];
-                    ImGui_ImplGDI_Texture* texture = (ImGui_ImplGDI_Texture*)pcmd->GetTexID();
-                    ImGui_ImplGDI_RenderDrawTriangle(pixel_buffer, fb_width, fb_height, pcmd->ClipRect, v1, v2, v3, texture);
-                    elem_i += 3;
+                    ImGui_ImplGDI_RenderCommand(
+                        hdc,
+                        solid_alpha_dev_ctx_handle,
+                        solid_alpha_pixel,
+                        pixel_buffer,
+                        fb_width,
+                        fb_height,
+                        pcmd->ClipRect,
+                        texture,
+                        render_command);
                 }
             }
         }
