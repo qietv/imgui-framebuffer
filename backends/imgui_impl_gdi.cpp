@@ -1639,58 +1639,81 @@ static inline bool ImGui_ImplGDI_ConstrainCoverageSpan(
     int& span_begin,
     int& span_end)
 {
-    /*
-     * At integer pixel offset n:
-     *
-     * edge(n) = edge_value + n * edge_step_x
-     *
-     * A top-left edge accepts edge >= 0.
-     * Other edges accept edge > 0.
-     */
     if (edge_step_x == 0.0f)
     {
         return edge_value >= 0.0f &&
             (edge_value != 0.0f || top_left);
     }
 
-    const float crossing =
-        -edge_value / edge_step_x;
+    const float crossing = -edge_value / edge_step_x;
+    const float current_begin = (float)span_begin;
+    const float current_last = (float)(span_end - 1);
 
     if (edge_step_x > 0.0f)
     {
-        /*
-         * edge >= 0: n >= crossing
-         * edge >  0: n >  crossing
-         */
-        const float first_accepted =
-            top_left
-            ? ceilf(crossing)
-            : floorf(crossing) + 1.0f;
+        if (top_left)
+        {
+            /*
+             * First accepted integer is ceil(crossing).
+             */
+            if (crossing <= current_begin)
+                return span_begin < span_end;
 
-        if (first_accepted >= (float)span_end)
-            return false;
+            if (crossing > current_last)
+                return false;
 
-        if (first_accepted > (float)span_begin)
-            span_begin = (int)first_accepted;
+            /*
+             * The range checks above guarantee that crossing is
+             * non-negative and safely representable as int.
+             */
+            const int truncated = (int)crossing;
+
+            span_begin = truncated + ((float)truncated < crossing ? 1 : 0);
+        }
+        else
+        {
+            /*
+             * First accepted integer is floor(crossing) + 1.
+             */
+            if (crossing < current_begin)
+                return span_begin < span_end;
+
+            if (crossing >= current_last)
+                return false;
+
+            span_begin = (int)crossing + 1;
+        }
     }
     else
     {
-        /*
-         * edge >= 0: n <= crossing
-         * edge >  0: n <  crossing
-         *
-         * span_end is exclusive.
-         */
-        const float first_rejected =
-            top_left
-            ? floorf(crossing) + 1.0f
-            : ceilf(crossing);
+        if (top_left)
+        {
+            /*
+             * Exclusive end is floor(crossing) + 1.
+             */
+            if (crossing >= current_last)
+                return span_begin < span_end;
 
-        if (first_rejected <= (float)span_begin)
-            return false;
+            if (crossing < current_begin)
+                return false;
 
-        if (first_rejected < (float)span_end)
-            span_end = (int)first_rejected;
+            span_end = (int)crossing + 1;
+        }
+        else
+        {
+            /*
+             * Exclusive end is ceil(crossing).
+             */
+            if (crossing > current_last)
+                return span_begin < span_end;
+
+            if (crossing <= current_begin)
+                return false;
+
+            const int truncated = (int)crossing;
+
+            span_end = truncated + ((float)truncated < crossing ? 1 : 0);
+        }
     }
 
     return span_begin < span_end;
@@ -1890,8 +1913,7 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     uint64_t covered_pixel_count = 0;
 #endif
 
-    if (RenderType ==
-        NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE)
+    if (RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE)
     {
         IM_ASSERT(color_1.Alpha == 255);
 
@@ -1906,38 +1928,48 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
             (size_t)y0 * framebuffer_width +
             x0;
 
+        const int maximum_span_width =
+            x1 - x0;
+
         for (int y = y0; y < y1; ++y)
         {
-            float edge_1 = edge_1_row;
-            float edge_2 = edge_2_row;
-            float edge_3 = edge_3_row;
+            int span_begin = 0;
+            int span_end = maximum_span_width;
 
-            ImU32* destination = destination_row;
+            const bool has_coverage =
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_1_row,
+                    edge_1_step_x,
+                    top_left_1,
+                    span_begin,
+                    span_end) &&
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_2_row,
+                    edge_2_step_x,
+                    top_left_2,
+                    span_begin,
+                    span_end) &&
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_3_row,
+                    edge_3_step_x,
+                    top_left_3,
+                    span_begin,
+                    span_end);
 
-            for (int x = x0; x < x1; ++x)
+            if (has_coverage)
             {
-                const bool inside =
-                    edge_1 >= 0.0f &&
-                    edge_2 >= 0.0f &&
-                    edge_3 >= 0.0f &&
-                    (edge_1 != 0.0f || top_left_1) &&
-                    (edge_2 != 0.0f || top_left_2) &&
-                    (edge_3 != 0.0f || top_left_3);
+                const int span_width =
+                    span_end - span_begin;
 
-                if (inside)
-                {
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
-                    ++covered_pixel_count;
+                covered_pixel_count +=
+                    (uint64_t)span_width;
 #endif
 
-                    * destination = fill_color;
-                }
-
-                ++destination;
-
-                edge_1 += edge_1_step_x;
-                edge_2 += edge_2_step_x;
-                edge_3 += edge_3_step_x;
+                ImGui_ImplGDI_FillSpan(
+                    destination_row + span_begin,
+                    (size_t)span_width,
+                    fill_color);
             }
 
             destination_row += framebuffer_width;
