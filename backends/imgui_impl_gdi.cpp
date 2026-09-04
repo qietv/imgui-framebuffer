@@ -241,16 +241,10 @@ uint32_t naive_swr_make_render_command(
 #pragma clang diagnostic ignored "-Wold-style-cast"         // warning: use of old-style cast                            // yes, they are more terse.
 #endif
 
-namespace
-{
-    template<typename Type>
-    Type InternalClamp(Type Value, Type Minimum, Type Maximum)
-    {
-        return ((Value < Minimum)
-            ? Minimum
-            : ((Value > Maximum) ? Maximum : Value));
-    }
-}
+   // All current arguments are side-effect-free scalar values.
+#define IMGUI_IMPL_GDI_CLAMP(value, minimum, maximum) (((value) < (minimum)) \
+    ? (minimum) \
+    : (((value) > (maximum)) ? (maximum) : (value)))
 
 struct ImGui_ImplGDI_Data
 {
@@ -409,26 +403,39 @@ IMGUI_IMPL_API void ImGui_ImplGDI_NewFrame()
 
 }
 
-static inline int ImGui_ImplGDI_Mul255(int a, int b)
-{
-    return (a * b + 127) / 255;
-}
-
 // Equivalent to (value + 127) / 255 for value in [0, 255 * 255],
 // but expressed using operations that are easier to vectorize.
-static inline ImU32 ImGui_ImplGDI_Div255Rounded(ImU32 value)
-{
-    value += 128u;
-    return (value + (value >> 8)) >> 8;
-}
+#define ImGui_ImplGDI_Div255Rounded(value) \
+    ((ImU32)((((ImU32)(value) + 128u) * 257u) >> 16))
+
+#define ImGui_ImplGDI_Mul255(a, b) \
+    ((int)ImGui_ImplGDI_Div255Rounded((ImU32)(a) * (ImU32)(b)))
 
 static inline void ImGui_ImplGDI_FillSpan(
     ImU32* destination,
     size_t pixel_count,
     ImU32 color)
 {
-    for (size_t i = 0; i < pixel_count; ++i)
-        destination[i] = color;
+    while (pixel_count >= 8)
+    {
+        destination[0] = color;
+        destination[1] = color;
+        destination[2] = color;
+        destination[3] = color;
+        destination[4] = color;
+        destination[5] = color;
+        destination[6] = color;
+        destination[7] = color;
+
+        destination += 8;
+        pixel_count -= 8;
+    }
+
+    while (pixel_count != 0)
+    {
+        *destination++ = color;
+        --pixel_count;
+    }
 }
 
 static inline void ImGui_ImplGDI_BlendOver(
@@ -514,10 +521,10 @@ static bool ImGui_ImplGDI_ClipPixelBounds(
     if (y1 > clip_y1)
         y1 = clip_y1;
 
-    x0 = ::InternalClamp(x0, 0, framebuffer_width);
-    y0 = ::InternalClamp(y0, 0, framebuffer_height);
-    x1 = ::InternalClamp(x1, 0, framebuffer_width);
-    y1 = ::InternalClamp(y1, 0, framebuffer_height);
+    x0 = IMGUI_IMPL_GDI_CLAMP(x0, 0, framebuffer_width);
+    y0 = IMGUI_IMPL_GDI_CLAMP(y0, 0, framebuffer_height);
+    x1 = IMGUI_IMPL_GDI_CLAMP(x1, 0, framebuffer_width);
+    y1 = IMGUI_IMPL_GDI_CLAMP(y1, 0, framebuffer_height);
 
     return x0 < x1 && y0 < y1;
 }
@@ -751,7 +758,7 @@ static void ImGui_ImplGDI_RenderTexturedRectangleCommand(
     {
         int texture_y_integer = (int)texture_y;
 
-        texture_y_integer = ::InternalClamp(
+        texture_y_integer = IMGUI_IMPL_GDI_CLAMP(
             texture_y_integer,
             0,
             texture->Height - 1);
@@ -762,7 +769,7 @@ static void ImGui_ImplGDI_RenderTexturedRectangleCommand(
         {
             int texture_x_integer = (int)texture_x;
 
-            texture_x_integer = ::InternalClamp(
+            texture_x_integer = IMGUI_IMPL_GDI_CLAMP(
                 texture_x_integer,
                 0,
                 texture->Width - 1);
@@ -1050,16 +1057,16 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                     0.5f);
 
                 vertex_red =
-                    ::InternalClamp(vertex_red, 0, 255);
+                    IMGUI_IMPL_GDI_CLAMP(vertex_red, 0, 255);
 
                 vertex_green =
-                    ::InternalClamp(vertex_green, 0, 255);
+                    IMGUI_IMPL_GDI_CLAMP(vertex_green, 0, 255);
 
                 vertex_blue =
-                    ::InternalClamp(vertex_blue, 0, 255);
+                    IMGUI_IMPL_GDI_CLAMP(vertex_blue, 0, 255);
 
                 vertex_alpha =
-                    ::InternalClamp(vertex_alpha, 0, 255);
+                    IMGUI_IMPL_GDI_CLAMP(vertex_alpha, 0, 255);
 
                 int source_red = vertex_red;
                 int source_green = vertex_green;
@@ -1085,12 +1092,12 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                     int texture_y =
                         (int)(texture_v * texture->Height);
 
-                    texture_x = ::InternalClamp(
+                    texture_x = IMGUI_IMPL_GDI_CLAMP(
                         texture_x,
                         0,
                         texture->Width - 1);
 
-                    texture_y = ::InternalClamp(
+                    texture_y = IMGUI_IMPL_GDI_CLAMP(
                         texture_y,
                         0,
                         texture->Height - 1);
