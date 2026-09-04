@@ -204,6 +204,31 @@ uint32_t naive_swr_make_render_command(
 
     if (texture_is_white)
     {
+        const ImU32 color_difference =
+            (vertices[0]->col ^ vertices[1]->col) |
+            (vertices[0]->col ^ vertices[2]->col);
+
+        if (color_difference == 0)
+        {
+            render_command->Type =
+                render_command->Command.Triangle.Colors[0].Alpha == 255
+                ? NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE
+                : NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE;
+
+            return 3;
+        }
+
+        const ImU32 alpha_mask =
+            (ImU32)0xFFu << IM_COL32_A_SHIFT;
+
+        if ((color_difference & ~alpha_mask) == 0)
+        {
+            render_command->Type =
+                NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE;
+
+            return 3;
+        }
+
         render_command->Type = NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE;
 
         return 3;
@@ -1065,7 +1090,10 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     IM_ASSERT(
         RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE ||
         RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE ||
-        RenderType == NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE);
+        RenderType == NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE);
 
     if (!pixel_buffer ||
         framebuffer_width <= 0 ||
@@ -1074,7 +1102,11 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         return;
     }
 
-    if (RenderType != NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE)
+    const bool is_textured =
+        RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE;
+
+    if (is_textured)
     {
         if (!texture ||
             !texture->Pixels ||
@@ -1103,8 +1135,6 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     const bool reverse_winding = area < 0.0f;
     const float normalized_area =
         reverse_winding ? -area : area;
-
-    const float inverse_area = 1.0f / normalized_area;
 
     float minimum_x = point_1.X;
     float minimum_y = point_1.Y;
@@ -1206,13 +1236,30 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     ImGui_ImplGDI_TriangleStatsClass statistics_class =
         ImGui_ImplGDI_TriangleStats_RGBA32Textured;
 
-    if (RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE)
+    if (RenderType ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE)
     {
         statistics_class =
-            ImGui_ImplGDI_ClassifySolidTriangle(
-                color_1,
-                color_2,
-                color_3);
+            ImGui_ImplGDI_TriangleStats_SolidUniformOpaque;
+    }
+    else if (RenderType ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE)
+    {
+        statistics_class =
+            ImGui_ImplGDI_TriangleStats_SolidUniformTranslucent;
+    }
+    else if (RenderType ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE)
+    {
+        statistics_class =
+            ImGui_ImplGDI_TriangleStats_SolidConstantRGBVaryingAlpha;
+    }
+    else if (RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE)
+    {
+        statistics_class = ImGui_ImplGDI_ClassifySolidTriangle(
+            color_1,
+            color_2,
+            color_3);
     }
     else if (
         RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE)
@@ -1231,6 +1278,263 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
     uint64_t covered_pixel_count = 0;
 #endif
+
+    if (RenderType ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE)
+    {
+        IM_ASSERT(color_1.Alpha == 255);
+
+        const ImU32 fill_color =
+            0xFF000000u |
+            ((ImU32)color_1.Red << 16) |
+            ((ImU32)color_1.Green << 8) |
+            ((ImU32)color_1.Blue << 0);
+
+        ImU32* destination_row =
+            pixel_buffer +
+            (size_t)y0 * framebuffer_width +
+            x0;
+
+        for (int y = y0; y < y1; ++y)
+        {
+            float edge_1 = edge_1_row;
+            float edge_2 = edge_2_row;
+            float edge_3 = edge_3_row;
+
+            ImU32* destination = destination_row;
+
+            for (int x = x0; x < x1; ++x)
+            {
+                const bool inside =
+                    edge_1 >= 0.0f &&
+                    edge_2 >= 0.0f &&
+                    edge_3 >= 0.0f &&
+                    (edge_1 != 0.0f || top_left_1) &&
+                    (edge_2 != 0.0f || top_left_2) &&
+                    (edge_3 != 0.0f || top_left_3);
+
+                if (inside)
+                {
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+                    ++covered_pixel_count;
+#endif
+
+                    * destination = fill_color;
+                }
+
+                ++destination;
+
+                edge_1 += edge_1_step_x;
+                edge_2 += edge_2_step_x;
+                edge_3 += edge_3_step_x;
+            }
+
+            destination_row += framebuffer_width;
+
+            edge_1_row += edge_1_step_y;
+            edge_2_row += edge_2_step_y;
+            edge_3_row += edge_3_step_y;
+        }
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+        path_statistics.CoveredPixelCount +=
+            covered_pixel_count;
+#endif
+
+        return;
+    }
+
+    if (RenderType ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE)
+    {
+        IM_ASSERT(
+            color_1.Alpha > 0 &&
+            color_1.Alpha < 255);
+
+        const ImU32 source_alpha = color_1.Alpha;
+        const ImU32 inverse_alpha = 255u - source_alpha;
+
+        const ImU32 source_red_alpha =
+            (ImU32)color_1.Red * source_alpha;
+
+        const ImU32 source_green_alpha =
+            (ImU32)color_1.Green * source_alpha;
+
+        const ImU32 source_blue_alpha =
+            (ImU32)color_1.Blue * source_alpha;
+
+        ImU32* destination_row =
+            pixel_buffer +
+            (size_t)y0 * framebuffer_width +
+            x0;
+
+        for (int y = y0; y < y1; ++y)
+        {
+            float edge_1 = edge_1_row;
+            float edge_2 = edge_2_row;
+            float edge_3 = edge_3_row;
+
+            ImU32* destination = destination_row;
+
+            for (int x = x0; x < x1; ++x)
+            {
+                const bool inside =
+                    edge_1 >= 0.0f &&
+                    edge_2 >= 0.0f &&
+                    edge_3 >= 0.0f &&
+                    (edge_1 != 0.0f || top_left_1) &&
+                    (edge_2 != 0.0f || top_left_2) &&
+                    (edge_3 != 0.0f || top_left_3);
+
+                if (inside)
+                {
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+                    ++covered_pixel_count;
+#endif
+
+                    const ImU32 destination_color =
+                        *destination;
+
+                    const ImU32 destination_blue =
+                        (destination_color >> 0) & 0xFFu;
+
+                    const ImU32 destination_green =
+                        (destination_color >> 8) & 0xFFu;
+
+                    const ImU32 destination_red =
+                        (destination_color >> 16) & 0xFFu;
+
+                    const ImU32 output_red =
+                        ImGui_ImplGDI_Div255Rounded(
+                            source_red_alpha +
+                            destination_red * inverse_alpha);
+
+                    const ImU32 output_green =
+                        ImGui_ImplGDI_Div255Rounded(
+                            source_green_alpha +
+                            destination_green * inverse_alpha);
+
+                    const ImU32 output_blue =
+                        ImGui_ImplGDI_Div255Rounded(
+                            source_blue_alpha +
+                            destination_blue * inverse_alpha);
+
+                    *destination =
+                        0xFF000000u |
+                        (output_red << 16) |
+                        (output_green << 8) |
+                        output_blue;
+                }
+
+                ++destination;
+
+                edge_1 += edge_1_step_x;
+                edge_2 += edge_2_step_x;
+                edge_3 += edge_3_step_x;
+            }
+
+            destination_row += framebuffer_width;
+
+            edge_1_row += edge_1_step_y;
+            edge_2_row += edge_2_step_y;
+            edge_3_row += edge_3_step_y;
+        }
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+        path_statistics.CoveredPixelCount +=
+            covered_pixel_count;
+#endif
+
+        return;
+    }
+
+    const float inverse_area = 1.0f / normalized_area;
+
+    if (RenderType ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE)
+    {
+        const int source_red = color_1.Red;
+        const int source_green = color_1.Green;
+        const int source_blue = color_1.Blue;
+
+        ImU32* destination_row =
+            pixel_buffer +
+            (size_t)y0 * framebuffer_width +
+            x0;
+
+        for (int y = y0; y < y1; ++y)
+        {
+            float edge_1 = edge_1_row;
+            float edge_2 = edge_2_row;
+            float edge_3 = edge_3_row;
+
+            ImU32* destination = destination_row;
+
+            for (int x = x0; x < x1; ++x)
+            {
+                const bool inside =
+                    edge_1 >= 0.0f &&
+                    edge_2 >= 0.0f &&
+                    edge_3 >= 0.0f &&
+                    (edge_1 != 0.0f || top_left_1) &&
+                    (edge_2 != 0.0f || top_left_2) &&
+                    (edge_3 != 0.0f || top_left_3);
+
+                if (inside)
+                {
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+                    ++covered_pixel_count;
+#endif
+
+                    const float weight_1 =
+                        edge_1 * inverse_area;
+
+                    const float weight_2 =
+                        edge_2 * inverse_area;
+
+                    const float weight_3 =
+                        edge_3 * inverse_area;
+
+                    int source_alpha = (int)(
+                        color_1.Alpha * weight_1 +
+                        color_2.Alpha * weight_2 +
+                        color_3.Alpha * weight_3 +
+                        0.5f);
+
+                    source_alpha = IMGUI_IMPL_GDI_CLAMP(
+                        source_alpha,
+                        0,
+                        255);
+
+                    ImGui_ImplGDI_BlendOver(
+                        destination,
+                        source_red,
+                        source_green,
+                        source_blue,
+                        source_alpha);
+                }
+
+                ++destination;
+
+                edge_1 += edge_1_step_x;
+                edge_2 += edge_2_step_x;
+                edge_3 += edge_3_step_x;
+            }
+
+            destination_row += framebuffer_width;
+
+            edge_1_row += edge_1_step_y;
+            edge_2_row += edge_2_step_y;
+            edge_3_row += edge_3_step_y;
+        }
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+        path_statistics.CoveredPixelCount +=
+            covered_pixel_count;
+#endif
+
+        return;
+    }
 
     const uint8_t* texture_bytes =
         texture
@@ -1470,6 +1774,39 @@ static void ImGui_ImplGDI_RenderCommand(
                 framebuffer_height,
                 clip_rect,
                 texture,
+                render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE:
+        ImGui_ImplGDI_RenderTriangleCommand<
+            NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                nullptr,
+                render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE:
+        ImGui_ImplGDI_RenderTriangleCommand<
+            NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                nullptr,
+                render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE:
+        ImGui_ImplGDI_RenderTriangleCommand<
+            NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                nullptr,
                 render_command);
         return;
 
