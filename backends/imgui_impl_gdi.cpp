@@ -2626,29 +2626,90 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         const float alpha_3 =
             (float)color_3.Alpha;
 
+        float alpha_row;
+        float alpha_step_x;
+        float alpha_step_y;
+
         /*
-         * Alpha is affine across the triangle. Build its value and
-         * derivatives once instead of calculating three barycentric
-         * weights and three weighted alpha terms for every covered
-         * pixel.
+         * If two vertices have the same alpha, use:
+         *
+         * alpha = common_alpha +
+         *     (unique_alpha - common_alpha) * unique_weight
+         *
+         * This replaces a complete three-weight alpha plane with one edge
+         * value and one pre-scaled alpha delta.
          */
-        float alpha_row =
-            (alpha_1 * edge_1_row +
-                alpha_2 * edge_2_row +
-                alpha_3 * edge_3_row) *
-            inverse_area;
+        if (color_1.Alpha == color_2.Alpha)
+        {
+            const float scaled_alpha_delta =
+                (alpha_3 - alpha_1) *
+                inverse_area;
 
-        const float alpha_step_x =
-            (alpha_1 * edge_1_step_x +
-                alpha_2 * edge_2_step_x +
-                alpha_3 * edge_3_step_x) *
-            inverse_area;
+            alpha_row =
+                alpha_1 +
+                edge_3_row * scaled_alpha_delta;
 
-        const float alpha_step_y =
-            (alpha_1 * edge_1_step_y +
-                alpha_2 * edge_2_step_y +
-                alpha_3 * edge_3_step_y) *
-            inverse_area;
+            alpha_step_x =
+                edge_3_step_x * scaled_alpha_delta;
+
+            alpha_step_y =
+                edge_3_step_y * scaled_alpha_delta;
+        }
+        else if (color_1.Alpha == color_3.Alpha)
+        {
+            const float scaled_alpha_delta =
+                (alpha_2 - alpha_1) *
+                inverse_area;
+
+            alpha_row =
+                alpha_1 +
+                edge_2_row * scaled_alpha_delta;
+
+            alpha_step_x =
+                edge_2_step_x * scaled_alpha_delta;
+
+            alpha_step_y =
+                edge_2_step_y * scaled_alpha_delta;
+        }
+        else if (color_2.Alpha == color_3.Alpha)
+        {
+            const float scaled_alpha_delta =
+                (alpha_1 - alpha_2) *
+                inverse_area;
+
+            alpha_row =
+                alpha_2 +
+                edge_1_row * scaled_alpha_delta;
+
+            alpha_step_x =
+                edge_1_step_x * scaled_alpha_delta;
+
+            alpha_step_y =
+                edge_1_step_y * scaled_alpha_delta;
+        }
+        else
+        {
+            /*
+             * General three-alpha fallback.
+             */
+            alpha_row =
+                (alpha_1 * edge_1_row +
+                    alpha_2 * edge_2_row +
+                    alpha_3 * edge_3_row) *
+                inverse_area;
+
+            alpha_step_x =
+                (alpha_1 * edge_1_step_x +
+                    alpha_2 * edge_2_step_x +
+                    alpha_3 * edge_3_step_x) *
+                inverse_area;
+
+            alpha_step_y =
+                (alpha_1 * edge_1_step_y +
+                    alpha_2 * edge_2_step_y +
+                    alpha_3 * edge_3_step_y) *
+                inverse_area;
+        }
 
         ImU32* destination_row =
             pixel_buffer +
