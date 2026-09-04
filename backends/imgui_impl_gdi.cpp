@@ -1380,16 +1380,20 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
             color_1.Alpha < 255);
 
         const ImU32 source_alpha = color_1.Alpha;
-        const ImU32 inverse_alpha = 255u - source_alpha;
 
-        const ImU32 source_red_alpha =
+        ImGui_ImplGDI_ConstantBlendState blend_state;
+
+        blend_state.SourceRedAlpha =
             (ImU32)color_1.Red * source_alpha;
 
-        const ImU32 source_green_alpha =
+        blend_state.SourceGreenAlpha =
             (ImU32)color_1.Green * source_alpha;
 
-        const ImU32 source_blue_alpha =
+        blend_state.SourceBlueAlpha =
             (ImU32)color_1.Blue * source_alpha;
+
+        blend_state.InverseAlpha =
+            255u - source_alpha;
 
         ImU32* destination_row =
             pixel_buffer +
@@ -1402,9 +1406,12 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
             float edge_2 = edge_2_row;
             float edge_3 = edge_3_row;
 
-            ImU32* destination = destination_row;
+            int x = x0;
 
-            for (int x = x0; x < x1; ++x)
+            /*
+             * Search for the first covered pixel in this row.
+             */
+            while (x < x1)
             {
                 const bool inside =
                     edge_1 >= 0.0f &&
@@ -1415,50 +1422,58 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                     (edge_3 != 0.0f || top_left_3);
 
                 if (inside)
-                {
-#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
-                    ++covered_pixel_count;
-#endif
+                    break;
 
-                    const ImU32 destination_color =
-                        *destination;
-
-                    const ImU32 destination_blue =
-                        (destination_color >> 0) & 0xFFu;
-
-                    const ImU32 destination_green =
-                        (destination_color >> 8) & 0xFFu;
-
-                    const ImU32 destination_red =
-                        (destination_color >> 16) & 0xFFu;
-
-                    const ImU32 output_red =
-                        ImGui_ImplGDI_Div255Rounded(
-                            source_red_alpha +
-                            destination_red * inverse_alpha);
-
-                    const ImU32 output_green =
-                        ImGui_ImplGDI_Div255Rounded(
-                            source_green_alpha +
-                            destination_green * inverse_alpha);
-
-                    const ImU32 output_blue =
-                        ImGui_ImplGDI_Div255Rounded(
-                            source_blue_alpha +
-                            destination_blue * inverse_alpha);
-
-                    *destination =
-                        0xFF000000u |
-                        (output_red << 16) |
-                        (output_green << 8) |
-                        output_blue;
-                }
-
-                ++destination;
+                ++x;
 
                 edge_1 += edge_1_step_x;
                 edge_2 += edge_2_step_x;
                 edge_3 += edge_3_step_x;
+            }
+
+            const int span_x0 = x;
+
+            if (span_x0 < x1)
+            {
+                /*
+                 * The intersection of a triangle and a horizontal
+                 * sample row is contiguous. Starting from the first
+                 * covered pixel, find the first pixel outside it.
+                 */
+                for (;;)
+                {
+                    ++x;
+
+                    edge_1 += edge_1_step_x;
+                    edge_2 += edge_2_step_x;
+                    edge_3 += edge_3_step_x;
+
+                    if (x >= x1)
+                        break;
+
+                    const bool inside =
+                        edge_1 >= 0.0f &&
+                        edge_2 >= 0.0f &&
+                        edge_3 >= 0.0f &&
+                        (edge_1 != 0.0f || top_left_1) &&
+                        (edge_2 != 0.0f || top_left_2) &&
+                        (edge_3 != 0.0f || top_left_3);
+
+                    if (!inside)
+                        break;
+                }
+
+                const int span_width = x - span_x0;
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+                covered_pixel_count +=
+                    (uint64_t)span_width;
+#endif
+
+                ImGui_ImplGDI_BlendConstantSpan(
+                    destination_row + (span_x0 - x0),
+                    (size_t)span_width,
+                    blend_state);
             }
 
             destination_row += framebuffer_width;
