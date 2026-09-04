@@ -241,7 +241,189 @@ uint32_t naive_swr_make_render_command(
 #pragma clang diagnostic ignored "-Wold-style-cast"         // warning: use of old-style cast                            // yes, they are more terse.
 #endif
 
-   // All current arguments are side-effect-free scalar values.
+// Temporary diagnostic switch. Must be off for formal performance testing.
+//#define IMGUI_IMPL_GDI_ENABLE_STATS
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+#include <stdarg.h>
+#include <stdio.h>
+
+enum ImGui_ImplGDI_TriangleStatsClass
+{
+    ImGui_ImplGDI_TriangleStats_SolidUniformOpaque,
+    ImGui_ImplGDI_TriangleStats_SolidUniformTranslucent,
+    ImGui_ImplGDI_TriangleStats_SolidConstantRGBVaryingAlpha,
+    ImGui_ImplGDI_TriangleStats_SolidGeneralVertexColor,
+    ImGui_ImplGDI_TriangleStats_Alpha8Textured,
+    ImGui_ImplGDI_TriangleStats_RGBA32Textured,
+    ImGui_ImplGDI_TriangleStats_Count
+};
+
+struct ImGui_ImplGDI_TrianglePathStats
+{
+    uint64_t CommandCount;
+    uint64_t CandidatePixelCount;
+    uint64_t CoveredPixelCount;
+};
+
+struct ImGui_ImplGDI_RectanglePathStats
+{
+    uint64_t CommandCount;
+    uint64_t PixelCount;
+};
+
+struct ImGui_ImplGDI_Stats
+{
+    uint64_t FrameCount;
+
+    ImGui_ImplGDI_TrianglePathStats
+        Triangles[ImGui_ImplGDI_TriangleStats_Count];
+
+    ImGui_ImplGDI_RectanglePathStats OpaqueRectangles;
+    ImGui_ImplGDI_RectanglePathStats TranslucentRectangles;
+};
+
+static ImGui_ImplGDI_Stats g_ImGui_ImplGDI_Stats = {};
+
+static void ImGui_ImplGDI_StatsDebugPrint(
+    const char* format,
+    ...)
+{
+    char buffer[1024];
+
+    va_list arguments;
+    va_start(arguments, format);
+
+#if defined(_MSC_VER)
+    _vsnprintf_s(
+        buffer,
+        sizeof(buffer),
+        _TRUNCATE,
+        format,
+        arguments);
+#else
+    vsnprintf(
+        buffer,
+        sizeof(buffer),
+        format,
+        arguments);
+
+    buffer[sizeof(buffer) - 1] = '\0';
+#endif
+
+    va_end(arguments);
+
+    ::OutputDebugStringA(buffer);
+}
+
+static ImGui_ImplGDI_TriangleStatsClass
+ImGui_ImplGDI_ClassifySolidTriangle(
+    const NAIVE_SWR_COLOR& color_1,
+    const NAIVE_SWR_COLOR& color_2,
+    const NAIVE_SWR_COLOR& color_3)
+{
+    const bool rgb_is_uniform =
+        color_1.Red == color_2.Red &&
+        color_1.Red == color_3.Red &&
+        color_1.Green == color_2.Green &&
+        color_1.Green == color_3.Green &&
+        color_1.Blue == color_2.Blue &&
+        color_1.Blue == color_3.Blue;
+
+    const bool alpha_is_uniform =
+        color_1.Alpha == color_2.Alpha &&
+        color_1.Alpha == color_3.Alpha;
+
+    if (rgb_is_uniform && alpha_is_uniform)
+    {
+        return color_1.Alpha == 255
+            ? ImGui_ImplGDI_TriangleStats_SolidUniformOpaque
+            : ImGui_ImplGDI_TriangleStats_SolidUniformTranslucent;
+    }
+
+    if (rgb_is_uniform)
+    {
+        return ImGui_ImplGDI_TriangleStats_SolidConstantRGBVaryingAlpha;
+    }
+
+    return ImGui_ImplGDI_TriangleStats_SolidGeneralVertexColor;
+}
+
+static void ImGui_ImplGDI_EndStatisticsFrame()
+{
+    const uint64_t report_frame_count = 120;
+
+    ++g_ImGui_ImplGDI_Stats.FrameCount;
+
+    if (g_ImGui_ImplGDI_Stats.FrameCount < report_frame_count)
+        return;
+
+    static const char* triangle_names[] =
+    {
+        "Solid uniform opaque",
+        "Solid uniform translucent",
+        "Solid constant RGB / varying alpha",
+        "Solid general vertex color",
+        "Alpha8 textured",
+        "RGBA32 textured"
+    };
+
+    const double frame_count =
+        (double)g_ImGui_ImplGDI_Stats.FrameCount;
+
+    ImGui_ImplGDI_StatsDebugPrint(
+        "\n=== ImGui GDI SWR statistics: %.0f frames ===\n",
+        frame_count);
+
+    for (int i = 0;
+        i < ImGui_ImplGDI_TriangleStats_Count;
+        ++i)
+    {
+        const ImGui_ImplGDI_TrianglePathStats& statistics =
+            g_ImGui_ImplGDI_Stats.Triangles[i];
+
+        const double coverage =
+            statistics.CandidatePixelCount != 0
+            ? (double)statistics.CoveredPixelCount * 100.0 /
+            (double)statistics.CandidatePixelCount
+            : 0.0;
+
+        ImGui_ImplGDI_StatsDebugPrint(
+            "%-38s cmd/frame=%8.2f"
+            "  candidate/frame=%10.0f"
+            "  covered/frame=%10.0f"
+            "  coverage=%6.2f%%\n",
+            triangle_names[i],
+            (double)statistics.CommandCount / frame_count,
+            (double)statistics.CandidatePixelCount / frame_count,
+            (double)statistics.CoveredPixelCount / frame_count,
+            coverage);
+    }
+
+    ImGui_ImplGDI_StatsDebugPrint(
+        "%-38s cmd/frame=%8.2f  pixels/frame=%10.0f\n",
+        "Opaque solid rectangles",
+        (double)g_ImGui_ImplGDI_Stats
+        .OpaqueRectangles.CommandCount / frame_count,
+        (double)g_ImGui_ImplGDI_Stats
+        .OpaqueRectangles.PixelCount / frame_count);
+
+    ImGui_ImplGDI_StatsDebugPrint(
+        "%-38s cmd/frame=%8.2f  pixels/frame=%10.0f\n",
+        "Translucent solid rectangles",
+        (double)g_ImGui_ImplGDI_Stats
+        .TranslucentRectangles.CommandCount / frame_count,
+        (double)g_ImGui_ImplGDI_Stats
+        .TranslucentRectangles.PixelCount / frame_count);
+
+    memset(
+        &g_ImGui_ImplGDI_Stats,
+        0,
+        sizeof(g_ImGui_ImplGDI_Stats));
+}
+#endif
+
+// All current arguments are side-effect-free scalar values.
 #define IMGUI_IMPL_GDI_CLAMP(value, minimum, maximum) (((value) < (minimum)) \
     ? (minimum) \
     : (((value) > (maximum)) ? (maximum) : (value)))
@@ -581,6 +763,21 @@ static void ImGui_ImplGDI_RenderSolidRectangleCommand(
     IM_ASSERT(pixel_buffer != nullptr);
 
     const int span_width = x1 - x0;
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+
+    const int span_height = y1 - y0;
+    ImGui_ImplGDI_RectanglePathStats& rectangle_statistics =
+        color.Alpha == 255
+        ? g_ImGui_ImplGDI_Stats.OpaqueRectangles
+        : g_ImGui_ImplGDI_Stats.TranslucentRectangles;
+
+    ++rectangle_statistics.CommandCount;
+
+    rectangle_statistics.PixelCount +=
+        (uint64_t)span_width * (uint64_t)span_height;
+#endif
+
 
     ImU32* destination_row =
         pixel_buffer + (size_t)y0 * framebuffer_width + x0;
@@ -1005,6 +1202,36 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     const NAIVE_SWR_COLOR& color_2 = triangle.Colors[1];
     const NAIVE_SWR_COLOR& color_3 = triangle.Colors[2];
 
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+    ImGui_ImplGDI_TriangleStatsClass statistics_class =
+        ImGui_ImplGDI_TriangleStats_RGBA32Textured;
+
+    if (RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE)
+    {
+        statistics_class =
+            ImGui_ImplGDI_ClassifySolidTriangle(
+                color_1,
+                color_2,
+                color_3);
+    }
+    else if (
+        RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE)
+    {
+        statistics_class =
+            ImGui_ImplGDI_TriangleStats_Alpha8Textured;
+    }
+
+    ImGui_ImplGDI_TrianglePathStats& path_statistics =
+        g_ImGui_ImplGDI_Stats.Triangles[statistics_class];
+
+    ++path_statistics.CommandCount;
+
+    path_statistics.CandidatePixelCount +=
+        (uint64_t)(x1 - x0) * (uint64_t)(y1 - y0);
+
+    uint64_t covered_pixel_count = 0;
+#endif
+
     const uint8_t* texture_bytes =
         texture
         ? reinterpret_cast<const uint8_t*>(texture->Pixels)
@@ -1028,6 +1255,10 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
             if (inside)
             {
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+                ++covered_pixel_count;
+#endif
+
                 const float weight_1 = edge_1 * inverse_area;
                 const float weight_2 = edge_2 * inverse_area;
                 const float weight_3 = edge_3 * inverse_area;
@@ -1159,6 +1390,10 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         edge_2_row += edge_2_step_y;
         edge_3_row += edge_3_step_y;
     }
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+    path_statistics.CoveredPixelCount += covered_pixel_count;
+#endif
 }
 
 static void ImGui_ImplGDI_RenderCommand(
@@ -1387,6 +1622,10 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
         pixel_buffer,
         &bitmap_info,
         DIB_RGB_COLORS);
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+    ImGui_ImplGDI_EndStatisticsFrame();
+#endif
 }
 
 #endif // #ifndef IMGUI_DISABLE
