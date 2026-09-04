@@ -296,6 +296,8 @@ uint32_t naive_swr_make_render_command(
 #define IMGUI_IMPL_GDI_HAS_SSE2
 #endif
 
+//#define IMGUI_IMPL_GDI_DIAGNOSTIC_REFERENCE_SOLID_TRIANGLES
+
 // Temporary diagnostic switch. Must be off for formal performance testing.
 //#define IMGUI_IMPL_GDI_ENABLE_STATS
 
@@ -2149,14 +2151,31 @@ static void ImGui_ImplGDI_RenderTexturedRectangleCommand(
     }
 }
 
-static inline float ImGui_ImplGDI_Edge(
+static inline double ImGui_ImplGDI_Edge(
     const NAIVE_SWR_POINT& a,
     const NAIVE_SWR_POINT& b,
-    float x,
-    float y)
+    double x,
+    double y)
 {
-    return (x - a.X) * (b.Y - a.Y) -
-        (y - a.Y) * (b.X - a.X);
+    const double a_x = (double)a.X;
+    const double a_y = (double)a.Y;
+    const double b_x = (double)b.X;
+    const double b_y = (double)b.Y;
+
+    const double coefficient_x =
+        b_y - a_y;
+
+    const double coefficient_y =
+        a_x - b_x;
+
+    const double constant =
+        a_y * b_x -
+        a_x * b_y;
+
+    return
+        coefficient_x * x +
+        coefficient_y * y +
+        constant;
 }
 
 static inline bool ImGui_ImplGDI_IsTopLeft(
@@ -2170,87 +2189,410 @@ static inline bool ImGui_ImplGDI_IsTopLeft(
         (delta_y == 0.0f && delta_x > 0.0f);
 }
 
+#if defined(IMGUI_IMPL_GDI_DIAGNOSTIC_REFERENCE_SOLID_TRIANGLES)
+
+struct ImGui_ImplGDI_ReferenceEdge
+{
+    double A;
+    double B;
+    double C;
+    bool TopLeft;
+};
+
+static double ImGui_ImplGDI_ReferenceRawEdge(
+    const NAIVE_SWR_POINT& a,
+    const NAIVE_SWR_POINT& b,
+    double x,
+    double y)
+{
+    const double coefficient_a =
+        (double)b.Y - (double)a.Y;
+
+    const double coefficient_b =
+        (double)a.X - (double)b.X;
+
+    const double coefficient_c =
+        (double)a.Y * (double)b.X -
+        (double)a.X * (double)b.Y;
+
+    return
+        coefficient_a * x +
+        coefficient_b * y +
+        coefficient_c;
+}
+
+static ImGui_ImplGDI_ReferenceEdge
+ImGui_ImplGDI_MakeReferenceClockwiseEdge(
+    const NAIVE_SWR_POINT& a,
+    const NAIVE_SWR_POINT& b)
+{
+    ImGui_ImplGDI_ReferenceEdge edge;
+
+    /*
+     * ImGui's usual screen-space triangle winding produces a
+     * negative RawEdge area. Negate the equation once so covered
+     * samples use edge >= 0.
+     */
+    edge.A = -(
+        (double)b.Y -
+        (double)a.Y);
+
+    edge.B = -(
+        (double)a.X -
+        (double)b.X);
+
+    edge.C = -(
+        (double)a.Y * (double)b.X -
+        (double)a.X * (double)b.Y);
+
+    edge.TopLeft =
+        ImGui_ImplGDI_IsTopLeft(a, b);
+
+    return edge;
+}
+
+static double ImGui_ImplGDI_EvaluateReferenceEdge(
+    const ImGui_ImplGDI_ReferenceEdge& edge,
+    double x,
+    double y)
+{
+    return
+        edge.A * x +
+        edge.B * y +
+        edge.C;
+}
+
+static void ImGui_ImplGDI_RenderReferenceSolidTriangleCommand(
+    ImU32* pixel_buffer,
+    int framebuffer_width,
+    int framebuffer_height,
+    const ImVec4& clip_rect,
+    const NAIVE_SWR_RENDER_COMMAND& render_command)
+{
+    if (!pixel_buffer ||
+        framebuffer_width <= 0 ||
+        framebuffer_height <= 0)
+    {
+        return;
+    }
+
+    const auto& triangle =
+        render_command.Command.Triangle;
+
+    const NAIVE_SWR_POINT* points[3] =
+    {
+        &triangle.Positions[0],
+        &triangle.Positions[1],
+        &triangle.Positions[2]
+    };
+
+    const NAIVE_SWR_COLOR* colors[3] =
+    {
+        &triangle.Colors[0],
+        &triangle.Colors[1],
+        &triangle.Colors[2]
+    };
+
+    double signed_area =
+        ImGui_ImplGDI_ReferenceRawEdge(
+            *points[0],
+            *points[1],
+            points[2]->X,
+            points[2]->Y);
+
+    if (signed_area == 0.0)
+        return;
+
+    /*
+     * Canonicalize to the winding normally produced by ImGui.
+     * Swap both position and color so barycentric attributes remain
+     * associated with the correct vertex.
+     */
+    if (signed_area > 0.0)
+    {
+        const NAIVE_SWR_POINT* temporary_point =
+            points[1];
+
+        points[1] = points[2];
+        points[2] = temporary_point;
+
+        const NAIVE_SWR_COLOR* temporary_color =
+            colors[1];
+
+        colors[1] = colors[2];
+        colors[2] = temporary_color;
+
+        signed_area = -signed_area;
+    }
+
+    const double normalized_area =
+        -signed_area;
+
+    float minimum_x = points[0]->X;
+    float minimum_y = points[0]->Y;
+    float maximum_x = points[0]->X;
+    float maximum_y = points[0]->Y;
+
+    for (int index = 1; index < 3; ++index)
+    {
+        if (points[index]->X < minimum_x)
+            minimum_x = points[index]->X;
+
+        if (points[index]->Y < minimum_y)
+            minimum_y = points[index]->Y;
+
+        if (points[index]->X > maximum_x)
+            maximum_x = points[index]->X;
+
+        if (points[index]->Y > maximum_y)
+            maximum_y = points[index]->Y;
+    }
+
+    int x0 = (int)floorf(minimum_x);
+    int y0 = (int)floorf(minimum_y);
+    int x1 = (int)ceilf(maximum_x);
+    int y1 = (int)ceilf(maximum_y);
+
+    if (!ImGui_ImplGDI_ClipPixelBounds(
+        x0,
+        y0,
+        x1,
+        y1,
+        framebuffer_width,
+        framebuffer_height,
+        clip_rect))
+    {
+        return;
+    }
+
+    const ImGui_ImplGDI_ReferenceEdge edge_1 =
+        ImGui_ImplGDI_MakeReferenceClockwiseEdge(
+            *points[1],
+            *points[2]);
+
+    const ImGui_ImplGDI_ReferenceEdge edge_2 =
+        ImGui_ImplGDI_MakeReferenceClockwiseEdge(
+            *points[2],
+            *points[0]);
+
+    const ImGui_ImplGDI_ReferenceEdge edge_3 =
+        ImGui_ImplGDI_MakeReferenceClockwiseEdge(
+            *points[0],
+            *points[1]);
+
+    const double first_pixel_x =
+        (double)x0 + 0.5;
+
+    const double first_pixel_y =
+        (double)y0 + 0.5;
+
+    double edge_value_1_row =
+        ImGui_ImplGDI_EvaluateReferenceEdge(
+            edge_1,
+            first_pixel_x,
+            first_pixel_y);
+
+    double edge_value_2_row =
+        ImGui_ImplGDI_EvaluateReferenceEdge(
+            edge_2,
+            first_pixel_x,
+            first_pixel_y);
+
+    double edge_value_3_row =
+        ImGui_ImplGDI_EvaluateReferenceEdge(
+            edge_3,
+            first_pixel_x,
+            first_pixel_y);
+
+    ImU32* destination_row =
+        pixel_buffer +
+        (size_t)y0 * framebuffer_width +
+        x0;
+
+    for (int y = y0; y < y1; ++y)
+    {
+        double edge_value_1 =
+            edge_value_1_row;
+
+        double edge_value_2 =
+            edge_value_2_row;
+
+        double edge_value_3 =
+            edge_value_3_row;
+
+        ImU32* destination =
+            destination_row;
+
+        for (int x = x0; x < x1; ++x)
+        {
+            const bool inside =
+                edge_value_1 >= 0.0 &&
+                edge_value_2 >= 0.0 &&
+                edge_value_3 >= 0.0 &&
+                (edge_value_1 != 0.0 || edge_1.TopLeft) &&
+                (edge_value_2 != 0.0 || edge_2.TopLeft) &&
+                (edge_value_3 != 0.0 || edge_3.TopLeft);
+
+            if (inside)
+            {
+                const double weight_1 =
+                    edge_value_1 /
+                    normalized_area;
+
+                const double weight_2 =
+                    edge_value_2 /
+                    normalized_area;
+
+                const double weight_3 =
+                    edge_value_3 /
+                    normalized_area;
+
+                int source_red = (int)(
+                    (double)colors[0]->Red * weight_1 +
+                    (double)colors[1]->Red * weight_2 +
+                    (double)colors[2]->Red * weight_3 +
+                    0.5);
+
+                int source_green = (int)(
+                    (double)colors[0]->Green * weight_1 +
+                    (double)colors[1]->Green * weight_2 +
+                    (double)colors[2]->Green * weight_3 +
+                    0.5);
+
+                int source_blue = (int)(
+                    (double)colors[0]->Blue * weight_1 +
+                    (double)colors[1]->Blue * weight_2 +
+                    (double)colors[2]->Blue * weight_3 +
+                    0.5);
+
+                int source_alpha = (int)(
+                    (double)colors[0]->Alpha * weight_1 +
+                    (double)colors[1]->Alpha * weight_2 +
+                    (double)colors[2]->Alpha * weight_3 +
+                    0.5);
+
+                source_red = IMGUI_IMPL_GDI_CLAMP(
+                    source_red, 0, 255);
+
+                source_green = IMGUI_IMPL_GDI_CLAMP(
+                    source_green, 0, 255);
+
+                source_blue = IMGUI_IMPL_GDI_CLAMP(
+                    source_blue, 0, 255);
+
+                source_alpha = IMGUI_IMPL_GDI_CLAMP(
+                    source_alpha, 0, 255);
+
+                ImGui_ImplGDI_BlendOver(
+                    destination,
+                    source_red,
+                    source_green,
+                    source_blue,
+                    source_alpha);
+            }
+
+            ++destination;
+
+            /*
+             * For A*x + B*y + C:
+             * moving one pixel in X adds A.
+             */
+            edge_value_1 += edge_1.A;
+            edge_value_2 += edge_2.A;
+            edge_value_3 += edge_3.A;
+        }
+
+        destination_row += framebuffer_width;
+
+        /*
+         * Moving one pixel in Y adds B.
+         */
+        edge_value_1_row += edge_1.B;
+        edge_value_2_row += edge_2.B;
+        edge_value_3_row += edge_3.B;
+    }
+}
+
+#endif
+
 static inline bool ImGui_ImplGDI_ConstrainCoverageSpan(
-    float edge_value,
-    float edge_step_x,
+    double edge_value,
+    double edge_step_x,
     bool top_left,
     int& span_begin,
     int& span_end)
 {
-    if (edge_step_x == 0.0f)
+    if (edge_step_x == 0.0)
     {
-        return edge_value >= 0.0f &&
-            (edge_value != 0.0f || top_left);
+        return edge_value >= 0.0 &&
+            (edge_value != 0.0 || top_left);
     }
 
-    const float crossing = -edge_value / edge_step_x;
-    const float current_begin = (float)span_begin;
-    const float current_last = (float)(span_end - 1);
+    const double crossing =
+        -edge_value / edge_step_x;
 
-    if (edge_step_x > 0.0f)
+    const double current_begin =
+        (double)span_begin;
+
+    const double current_last =
+        (double)(span_end - 1);
+
+    if (edge_step_x > 0.0)
     {
         if (top_left)
         {
-            /*
-             * First accepted integer is ceil(crossing).
-             */
             if (crossing <= current_begin)
                 return span_begin < span_end;
 
             if (crossing > current_last)
                 return false;
 
-            /*
-             * The range checks above guarantee that crossing is
-             * non-negative and safely representable as int.
-             */
-            const int truncated = (int)crossing;
+            const int truncated =
+                (int)crossing;
 
-            span_begin = truncated + ((float)truncated < crossing ? 1 : 0);
+            span_begin =
+                truncated +
+                ((double)truncated < crossing ? 1 : 0);
         }
         else
         {
-            /*
-             * First accepted integer is floor(crossing) + 1.
-             */
             if (crossing < current_begin)
                 return span_begin < span_end;
 
             if (crossing >= current_last)
                 return false;
 
-            span_begin = (int)crossing + 1;
+            span_begin =
+                (int)crossing + 1;
         }
     }
     else
     {
         if (top_left)
         {
-            /*
-             * Exclusive end is floor(crossing) + 1.
-             */
             if (crossing >= current_last)
                 return span_begin < span_end;
 
             if (crossing < current_begin)
                 return false;
 
-            span_end = (int)crossing + 1;
+            span_end =
+                (int)crossing + 1;
         }
         else
         {
-            /*
-             * Exclusive end is ceil(crossing).
-             */
             if (crossing > current_last)
                 return span_begin < span_end;
 
             if (crossing <= current_begin)
                 return false;
 
-            const int truncated = (int)crossing;
+            const int truncated =
+                (int)crossing;
 
-            span_end = truncated + ((float)truncated < crossing ? 1 : 0);
+            span_end =
+                truncated +
+                ((double)truncated < crossing ? 1 : 0);
         }
     }
 
@@ -2311,18 +2653,23 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     const NAIVE_SWR_POINT& point_2 = triangle.Positions[1];
     const NAIVE_SWR_POINT& point_3 = triangle.Positions[2];
 
-    const float area = ImGui_ImplGDI_Edge(
-        point_1,
-        point_2,
-        point_3.X,
-        point_3.Y);
+    const double area =
+        ImGui_ImplGDI_Edge(
+            point_1,
+            point_2,
+            (double)point_3.X,
+            (double)point_3.Y);
 
-    if (area > -0.000001f && area < 0.000001f)
+    if (area == 0.0)
         return;
 
-    const bool reverse_winding = area < 0.0f;
-    const float normalized_area =
-        reverse_winding ? -area : area;
+    const bool reverse_winding =
+        area < 0.0;
+
+    const double normalized_area =
+        reverse_winding
+        ? -area
+        : area;
 
     float minimum_x = point_1.X;
     float minimum_y = point_1.Y;
@@ -2357,42 +2704,70 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     }
 
     const bool top_left_1 =
-        ImGui_ImplGDI_IsTopLeft(point_2, point_3);
+        reverse_winding
+        ? ImGui_ImplGDI_IsTopLeft(point_2, point_3)
+        : ImGui_ImplGDI_IsTopLeft(point_3, point_2);
 
     const bool top_left_2 =
-        ImGui_ImplGDI_IsTopLeft(point_3, point_1);
+        reverse_winding
+        ? ImGui_ImplGDI_IsTopLeft(point_3, point_1)
+        : ImGui_ImplGDI_IsTopLeft(point_1, point_3);
 
     const bool top_left_3 =
-        ImGui_ImplGDI_IsTopLeft(point_1, point_2);
+        reverse_winding
+        ? ImGui_ImplGDI_IsTopLeft(point_1, point_2)
+        : ImGui_ImplGDI_IsTopLeft(point_2, point_1);
 
-    float edge_1_step_x = point_3.Y - point_2.Y;
-    float edge_2_step_x = point_1.Y - point_3.Y;
-    float edge_3_step_x = point_2.Y - point_1.Y;
+    double edge_1_step_x =
+        (double)point_3.Y -
+        (double)point_2.Y;
 
-    float edge_1_step_y = -(point_3.X - point_2.X);
-    float edge_2_step_y = -(point_1.X - point_3.X);
-    float edge_3_step_y = -(point_2.X - point_1.X);
+    double edge_2_step_x =
+        (double)point_1.Y -
+        (double)point_3.Y;
 
-    const float first_pixel_x = (float)x0 + 0.5f;
-    const float first_pixel_y = (float)y0 + 0.5f;
+    double edge_3_step_x =
+        (double)point_2.Y -
+        (double)point_1.Y;
 
-    float edge_1_row = ImGui_ImplGDI_Edge(
-        point_2,
-        point_3,
-        first_pixel_x,
-        first_pixel_y);
+    double edge_1_step_y =
+        -((double)point_3.X -
+            (double)point_2.X);
 
-    float edge_2_row = ImGui_ImplGDI_Edge(
-        point_3,
-        point_1,
-        first_pixel_x,
-        first_pixel_y);
+    double edge_2_step_y =
+        -((double)point_1.X -
+            (double)point_3.X);
 
-    float edge_3_row = ImGui_ImplGDI_Edge(
-        point_1,
-        point_2,
-        first_pixel_x,
-        first_pixel_y);
+    double edge_3_step_y =
+        -((double)point_2.X -
+            (double)point_1.X);
+
+    const double first_pixel_x =
+        (double)x0 + 0.5;
+
+    const double first_pixel_y =
+        (double)y0 + 0.5;
+
+    double edge_1_row =
+        ImGui_ImplGDI_Edge(
+            point_2,
+            point_3,
+            first_pixel_x,
+            first_pixel_y);
+
+    double edge_2_row =
+        ImGui_ImplGDI_Edge(
+            point_3,
+            point_1,
+            first_pixel_x,
+            first_pixel_y);
+
+    double edge_3_row =
+        ImGui_ImplGDI_Edge(
+            point_1,
+            point_2,
+            first_pixel_x,
+            first_pixel_y);
 
     /*
      * The previous implementation multiplied every edge value by
@@ -2609,26 +2984,33 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         return;
     }
 
-    const float inverse_area = 1.0f / normalized_area;
+    const double inverse_area =
+        1.0 / normalized_area;
 
-    if (RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE)
+    if (RenderType ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE)
     {
-        const int source_red = color_1.Red;
-        const int source_green = color_1.Green;
-        const int source_blue = color_1.Blue;
+        const int source_red =
+            color_1.Red;
 
-        const float alpha_1 =
-            (float)color_1.Alpha;
+        const int source_green =
+            color_1.Green;
 
-        const float alpha_2 =
-            (float)color_2.Alpha;
+        const int source_blue =
+            color_1.Blue;
 
-        const float alpha_3 =
-            (float)color_3.Alpha;
+        const double alpha_1 =
+            (double)color_1.Alpha;
 
-        float alpha_row;
-        float alpha_step_x;
-        float alpha_step_y;
+        const double alpha_2 =
+            (double)color_2.Alpha;
+
+        const double alpha_3 =
+            (double)color_3.Alpha;
+
+        double alpha_row;
+        double alpha_step_x;
+        double alpha_step_y;
 
         /*
          * If two vertices have the same alpha, use:
@@ -2636,12 +3018,11 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
          * alpha = common_alpha +
          *     (unique_alpha - common_alpha) * unique_weight
          *
-         * This replaces a complete three-weight alpha plane with one edge
-         * value and one pre-scaled alpha delta.
+         * The edge values and the alpha plane now use double precision.
          */
         if (color_1.Alpha == color_2.Alpha)
         {
-            const float scaled_alpha_delta =
+            const double scaled_alpha_delta =
                 (alpha_3 - alpha_1) *
                 inverse_area;
 
@@ -2657,7 +3038,7 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         }
         else if (color_1.Alpha == color_3.Alpha)
         {
-            const float scaled_alpha_delta =
+            const double scaled_alpha_delta =
                 (alpha_2 - alpha_1) *
                 inverse_area;
 
@@ -2673,7 +3054,7 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         }
         else if (color_2.Alpha == color_3.Alpha)
         {
-            const float scaled_alpha_delta =
+            const double scaled_alpha_delta =
                 (alpha_1 - alpha_2) *
                 inverse_area;
 
@@ -2716,7 +3097,8 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
             (size_t)y0 * framebuffer_width +
             x0;
 
-        const int maximum_span_width = x1 - x0;
+        const int maximum_span_width =
+            x1 - x0;
 
         for (int y = y0; y < y1; ++y)
         {
@@ -2745,24 +3127,30 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
             if (has_coverage)
             {
-                const float interpolated_alpha_at_span_begin =
+                const double interpolated_alpha_at_span_begin =
                     alpha_row +
-                    alpha_step_x * (float)span_begin;
+                    alpha_step_x * (double)span_begin;
 
-                float interpolated_alpha = interpolated_alpha_at_span_begin;
+                double interpolated_alpha =
+                    interpolated_alpha_at_span_begin;
 
-                const int span_width = span_end - span_begin;
+                const int span_width =
+                    span_end - span_begin;
 
-                ImU32* destination = destination_row + span_begin;
+                ImU32* destination =
+                    destination_row + span_begin;
 
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
                 covered_pixel_count +=
                     (uint64_t)span_width;
 #endif
 
-                for (int offset = 0; offset < span_width; ++offset)
+                for (int offset = 0;
+                    offset < span_width;
+                    ++offset)
                 {
-                    int source_alpha = (int)(interpolated_alpha + 0.5f);
+                    int source_alpha =
+                        (int)(interpolated_alpha + 0.5);
 
                     source_alpha = IMGUI_IMPL_GDI_CLAMP(
                         source_alpha,
@@ -2778,7 +3166,8 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
                     ++destination;
 
-                    interpolated_alpha += alpha_step_x;
+                    interpolated_alpha +=
+                        alpha_step_x;
                 }
             }
 
@@ -2792,21 +3181,34 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         }
 
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
-        path_statistics.CoveredPixelCount += covered_pixel_count;
+        path_statistics.CoveredPixelCount +=
+            covered_pixel_count;
 #endif
 
         return;
     }
 
-    const uint8_t* texture_bytes = texture ? texture->Pixels : nullptr;
+    const uint8_t* texture_bytes =
+        texture
+        ? texture->Pixels
+        : nullptr;
 
-    if (RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE ||
-        RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE)
+    if (RenderType ==
+        NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE ||
+        RenderType ==
+        NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE)
     {
-        const int source_red = color_1.Red;
-        const int source_green = color_1.Green;
-        const int source_blue = color_1.Blue;
-        const int tint_alpha = color_1.Alpha;
+        const int source_red =
+            color_1.Red;
+
+        const int source_green =
+            color_1.Green;
+
+        const int source_blue =
+            color_1.Blue;
+
+        const int tint_alpha =
+            color_1.Alpha;
 
         if (RenderType ==
             NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE)
@@ -2815,72 +3217,84 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         }
         else
         {
-            IM_ASSERT(tint_alpha > 0 && tint_alpha < 255);
+            IM_ASSERT(
+                tint_alpha > 0 &&
+                tint_alpha < 255);
         }
 
-        const NAIVE_SWR_TEXTURE_COORDINATE& texture_coordinate_1 =
+        const NAIVE_SWR_TEXTURE_COORDINATE&
+            texture_coordinate_1 =
             triangle.TextureCoordinates[0];
 
-        const NAIVE_SWR_TEXTURE_COORDINATE& texture_coordinate_2 =
+        const NAIVE_SWR_TEXTURE_COORDINATE&
+            texture_coordinate_2 =
             triangle.TextureCoordinates[1];
 
-        const NAIVE_SWR_TEXTURE_COORDINATE& texture_coordinate_3 =
+        const NAIVE_SWR_TEXTURE_COORDINATE&
+            texture_coordinate_3 =
             triangle.TextureCoordinates[2];
 
-        const float texture_width = (float)texture->Width;
-        const float texture_height = (float)texture->Height;
+        const double texture_width =
+            (double)texture->Width;
+
+        const double texture_height =
+            (double)texture->Height;
 
         /*
-         * Build the affine planes directly in texel space, moving the
-         * normalized-UV-to-texel multiplication out of the pixel loop.
+         * Build the affine planes directly in texel space. Coverage and
+         * texture-coordinate interpolation both use double precision.
          */
+        double texture_x_row =
+            ((double)texture_coordinate_1.U *
+                (edge_1_row * inverse_area) +
+                (double)texture_coordinate_2.U *
+                (edge_2_row * inverse_area) +
+                (double)texture_coordinate_3.U *
+                (edge_3_row * inverse_area)) *
+            texture_width;
 
-        float texture_x_row =
-            (texture_coordinate_1.U *
+        double texture_y_row =
+            ((double)texture_coordinate_1.V *
                 (edge_1_row * inverse_area) +
-                texture_coordinate_2.U *
+                (double)texture_coordinate_2.V *
                 (edge_2_row * inverse_area) +
-                texture_coordinate_3.U *
-                (edge_3_row * inverse_area)) *
-            texture_width;
-        float texture_y_row =
-            (texture_coordinate_1.V *
-                (edge_1_row * inverse_area) +
-                texture_coordinate_2.V *
-                (edge_2_row * inverse_area) +
-                texture_coordinate_3.V *
+                (double)texture_coordinate_3.V *
                 (edge_3_row * inverse_area)) *
             texture_height;
-        const float texture_x_step_x =
-            (texture_coordinate_1.U *
+
+        const double texture_x_step_x =
+            ((double)texture_coordinate_1.U *
                 (edge_1_step_x * inverse_area) +
-                texture_coordinate_2.U *
+                (double)texture_coordinate_2.U *
                 (edge_2_step_x * inverse_area) +
-                texture_coordinate_3.U *
+                (double)texture_coordinate_3.U *
                 (edge_3_step_x * inverse_area)) *
             texture_width;
-        const float texture_y_step_x =
-            (texture_coordinate_1.V *
+
+        const double texture_y_step_x =
+            ((double)texture_coordinate_1.V *
                 (edge_1_step_x * inverse_area) +
-                texture_coordinate_2.V *
+                (double)texture_coordinate_2.V *
                 (edge_2_step_x * inverse_area) +
-                texture_coordinate_3.V *
+                (double)texture_coordinate_3.V *
                 (edge_3_step_x * inverse_area)) *
             texture_height;
-        const float texture_x_step_y =
-            (texture_coordinate_1.U *
+
+        const double texture_x_step_y =
+            ((double)texture_coordinate_1.U *
                 (edge_1_step_y * inverse_area) +
-                texture_coordinate_2.U *
+                (double)texture_coordinate_2.U *
                 (edge_2_step_y * inverse_area) +
-                texture_coordinate_3.U *
+                (double)texture_coordinate_3.U *
                 (edge_3_step_y * inverse_area)) *
             texture_width;
-        const float texture_y_step_y =
-            (texture_coordinate_1.V *
+
+        const double texture_y_step_y =
+            ((double)texture_coordinate_1.V *
                 (edge_1_step_y * inverse_area) +
-                texture_coordinate_2.V *
+                (double)texture_coordinate_2.V *
                 (edge_2_step_y * inverse_area) +
-                texture_coordinate_3.V *
+                (double)texture_coordinate_3.V *
                 (edge_3_step_y * inverse_area)) *
             texture_height;
 
@@ -2919,13 +3333,14 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
             if (has_coverage)
             {
-                const float span_offset = (float)span_begin;
+                const double span_offset =
+                    (double)span_begin;
 
-                float sampled_texture_x =
+                double sampled_texture_x =
                     texture_x_row +
                     texture_x_step_x * span_offset;
 
-                float sampled_texture_y =
+                double sampled_texture_y =
                     texture_y_row +
                     texture_y_step_x * span_offset;
 
@@ -2944,9 +3359,11 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                     offset < span_width;
                     ++offset)
                 {
-                    int texture_x = (int)sampled_texture_x;
+                    int texture_x =
+                        (int)sampled_texture_x;
 
-                    int texture_y = (int)sampled_texture_y;
+                    int texture_y =
+                        (int)sampled_texture_y;
 
                     texture_x = IMGUI_IMPL_GDI_CLAMP(
                         texture_x,
@@ -2959,7 +3376,8 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                         texture->Height - 1);
 
                     const size_t texture_index =
-                        (size_t)texture_y * texture->Width +
+                        (size_t)texture_y *
+                        texture->Width +
                         texture_x;
 
                     const int texture_alpha =
@@ -2982,8 +3400,11 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
                     ++destination;
 
-                    sampled_texture_x += texture_x_step_x;
-                    sampled_texture_y += texture_y_step_x;
+                    sampled_texture_x +=
+                        texture_x_step_x;
+
+                    sampled_texture_y +=
+                        texture_y_step_x;
                 }
             }
 
@@ -3005,21 +3426,29 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         return;
     }
 
+    /*
+     * General solid/Alpha8/RGBA32 triangle fallback.
+     */
     for (int y = y0; y < y1; ++y)
     {
-        float edge_1 = edge_1_row;
-        float edge_2 = edge_2_row;
-        float edge_3 = edge_3_row;
+        double edge_1 =
+            edge_1_row;
+
+        double edge_2 =
+            edge_2_row;
+
+        double edge_3 =
+            edge_3_row;
 
         for (int x = x0; x < x1; ++x)
         {
             const bool inside =
-                edge_1 >= 0.0f &&
-                edge_2 >= 0.0f &&
-                edge_3 >= 0.0f &&
-                (edge_1 != 0.0f || top_left_1) &&
-                (edge_2 != 0.0f || top_left_2) &&
-                (edge_3 != 0.0f || top_left_3);
+                edge_1 >= 0.0 &&
+                edge_2 >= 0.0 &&
+                edge_3 >= 0.0 &&
+                (edge_1 != 0.0 || top_left_1) &&
+                (edge_2 != 0.0 || top_left_2) &&
+                (edge_3 != 0.0 || top_left_3);
 
             if (inside)
             {
@@ -3027,69 +3456,99 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                 ++covered_pixel_count;
 #endif
 
-                const float weight_1 = edge_1 * inverse_area;
-                const float weight_2 = edge_2 * inverse_area;
-                const float weight_3 = edge_3 * inverse_area;
+                const double weight_1 =
+                    edge_1 * inverse_area;
+
+                const double weight_2 =
+                    edge_2 * inverse_area;
+
+                const double weight_3 =
+                    edge_3 * inverse_area;
 
                 int vertex_red = (int)(
-                    color_1.Red * weight_1 +
-                    color_2.Red * weight_2 +
-                    color_3.Red * weight_3 +
-                    0.5f);
+                    (double)color_1.Red * weight_1 +
+                    (double)color_2.Red * weight_2 +
+                    (double)color_3.Red * weight_3 +
+                    0.5);
 
                 int vertex_green = (int)(
-                    color_1.Green * weight_1 +
-                    color_2.Green * weight_2 +
-                    color_3.Green * weight_3 +
-                    0.5f);
+                    (double)color_1.Green * weight_1 +
+                    (double)color_2.Green * weight_2 +
+                    (double)color_3.Green * weight_3 +
+                    0.5);
 
                 int vertex_blue = (int)(
-                    color_1.Blue * weight_1 +
-                    color_2.Blue * weight_2 +
-                    color_3.Blue * weight_3 +
-                    0.5f);
+                    (double)color_1.Blue * weight_1 +
+                    (double)color_2.Blue * weight_2 +
+                    (double)color_3.Blue * weight_3 +
+                    0.5);
 
                 int vertex_alpha = (int)(
-                    color_1.Alpha * weight_1 +
-                    color_2.Alpha * weight_2 +
-                    color_3.Alpha * weight_3 +
-                    0.5f);
+                    (double)color_1.Alpha * weight_1 +
+                    (double)color_2.Alpha * weight_2 +
+                    (double)color_3.Alpha * weight_3 +
+                    0.5);
 
-                vertex_red =
-                    IMGUI_IMPL_GDI_CLAMP(vertex_red, 0, 255);
+                vertex_red = IMGUI_IMPL_GDI_CLAMP(
+                    vertex_red,
+                    0,
+                    255);
 
-                vertex_green =
-                    IMGUI_IMPL_GDI_CLAMP(vertex_green, 0, 255);
+                vertex_green = IMGUI_IMPL_GDI_CLAMP(
+                    vertex_green,
+                    0,
+                    255);
 
-                vertex_blue =
-                    IMGUI_IMPL_GDI_CLAMP(vertex_blue, 0, 255);
+                vertex_blue = IMGUI_IMPL_GDI_CLAMP(
+                    vertex_blue,
+                    0,
+                    255);
 
-                vertex_alpha =
-                    IMGUI_IMPL_GDI_CLAMP(vertex_alpha, 0, 255);
+                vertex_alpha = IMGUI_IMPL_GDI_CLAMP(
+                    vertex_alpha,
+                    0,
+                    255);
 
-                int source_red = vertex_red;
-                int source_green = vertex_green;
-                int source_blue = vertex_blue;
-                int source_alpha = vertex_alpha;
+                int source_red =
+                    vertex_red;
+
+                int source_green =
+                    vertex_green;
+
+                int source_blue =
+                    vertex_blue;
+
+                int source_alpha =
+                    vertex_alpha;
 
                 if (RenderType !=
                     NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE)
                 {
-                    const float texture_u =
-                        triangle.TextureCoordinates[0].U * weight_1 +
-                        triangle.TextureCoordinates[1].U * weight_2 +
-                        triangle.TextureCoordinates[2].U * weight_3;
+                    const double texture_u =
+                        (double)triangle.TextureCoordinates[0].U *
+                        weight_1 +
+                        (double)triangle.TextureCoordinates[1].U *
+                        weight_2 +
+                        (double)triangle.TextureCoordinates[2].U *
+                        weight_3;
 
-                    const float texture_v =
-                        triangle.TextureCoordinates[0].V * weight_1 +
-                        triangle.TextureCoordinates[1].V * weight_2 +
-                        triangle.TextureCoordinates[2].V * weight_3;
+                    const double texture_v =
+                        (double)triangle.TextureCoordinates[0].V *
+                        weight_1 +
+                        (double)triangle.TextureCoordinates[1].V *
+                        weight_2 +
+                        (double)triangle.TextureCoordinates[2].V *
+                        weight_3;
 
                     int texture_x =
-                        (int)(texture_u * texture->Width);
+                        (int)(
+                            texture_u *
+                            (double)texture->Width);
 
                     int texture_y =
-                        (int)(texture_v * texture->Height);
+                        (int)(
+                            texture_v *
+                            (double)texture->Height);
 
                     texture_x = IMGUI_IMPL_GDI_CLAMP(
                         texture_x,
@@ -3102,7 +3561,8 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                         texture->Height - 1);
 
                     const size_t texture_index =
-                        (size_t)texture_y * texture->Width +
+                        (size_t)texture_y *
+                        texture->Width +
                         texture_x;
 
                     if (is_alpha8_textured)
@@ -3110,35 +3570,43 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                         const int texture_alpha =
                             texture_bytes[texture_index];
 
-                        source_alpha = ImGui_ImplGDI_Mul255(
-                            texture_alpha,
-                            vertex_alpha);
+                        source_alpha =
+                            ImGui_ImplGDI_Mul255(
+                                texture_alpha,
+                                vertex_alpha);
                     }
                     else
                     {
                         const uint8_t* texel =
-                            texture_bytes + texture_index * 4;
+                            texture_bytes +
+                            texture_index * 4;
 
-                        source_red = ImGui_ImplGDI_Mul255(
-                            texel[0],
-                            vertex_red);
+                        source_red =
+                            ImGui_ImplGDI_Mul255(
+                                texel[0],
+                                vertex_red);
 
-                        source_green = ImGui_ImplGDI_Mul255(
-                            texel[1],
-                            vertex_green);
+                        source_green =
+                            ImGui_ImplGDI_Mul255(
+                                texel[1],
+                                vertex_green);
 
-                        source_blue = ImGui_ImplGDI_Mul255(
-                            texel[2],
-                            vertex_blue);
+                        source_blue =
+                            ImGui_ImplGDI_Mul255(
+                                texel[2],
+                                vertex_blue);
 
-                        source_alpha = ImGui_ImplGDI_Mul255(
-                            texel[3],
-                            vertex_alpha);
+                        source_alpha =
+                            ImGui_ImplGDI_Mul255(
+                                texel[3],
+                                vertex_alpha);
                     }
                 }
 
                 ImU32* destination =
-                    pixel_buffer + (size_t)y * framebuffer_width + x;
+                    pixel_buffer +
+                    (size_t)y * framebuffer_width +
+                    x;
 
                 ImGui_ImplGDI_BlendOver(
                     destination,
@@ -3159,7 +3627,8 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     }
 
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
-    path_statistics.CoveredPixelCount += covered_pixel_count;
+    path_statistics.CoveredPixelCount +=
+        covered_pixel_count;
 #endif
 }
 
@@ -3171,6 +3640,29 @@ static void ImGui_ImplGDI_RenderCommand(
     const ImGui_ImplGDI_Texture* texture,
     const NAIVE_SWR_RENDER_COMMAND& render_command)
 {
+#if defined(IMGUI_IMPL_GDI_DIAGNOSTIC_REFERENCE_SOLID_TRIANGLES)
+
+    if (render_command.Type ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE ||
+        render_command.Type ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE ||
+        render_command.Type ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE ||
+        render_command.Type ==
+        NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE)
+    {
+        ImGui_ImplGDI_RenderReferenceSolidTriangleCommand(
+            pixel_buffer,
+            framebuffer_width,
+            framebuffer_height,
+            clip_rect,
+            render_command);
+
+        return;
+    }
+
+#endif
+
     switch (render_command.Type)
     {
     case NAIVE_SWR_RENDER_TYPE_SKIPPED:
