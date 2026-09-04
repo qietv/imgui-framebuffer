@@ -1632,6 +1632,70 @@ static inline bool ImGui_ImplGDI_IsTopLeft(
         (delta_y == 0.0f && delta_x > 0.0f);
 }
 
+static inline bool ImGui_ImplGDI_ConstrainCoverageSpan(
+    float edge_value,
+    float edge_step_x,
+    bool top_left,
+    int& span_begin,
+    int& span_end)
+{
+    /*
+     * At integer pixel offset n:
+     *
+     * edge(n) = edge_value + n * edge_step_x
+     *
+     * A top-left edge accepts edge >= 0.
+     * Other edges accept edge > 0.
+     */
+    if (edge_step_x == 0.0f)
+    {
+        return edge_value >= 0.0f &&
+            (edge_value != 0.0f || top_left);
+    }
+
+    const float crossing =
+        -edge_value / edge_step_x;
+
+    if (edge_step_x > 0.0f)
+    {
+        /*
+         * edge >= 0: n >= crossing
+         * edge >  0: n >  crossing
+         */
+        const float first_accepted =
+            top_left
+            ? ceilf(crossing)
+            : floorf(crossing) + 1.0f;
+
+        if (first_accepted >= (float)span_end)
+            return false;
+
+        if (first_accepted > (float)span_begin)
+            span_begin = (int)first_accepted;
+    }
+    else
+    {
+        /*
+         * edge >= 0: n <= crossing
+         * edge >  0: n <  crossing
+         *
+         * span_end is exclusive.
+         */
+        const float first_rejected =
+            top_left
+            ? floorf(crossing) + 1.0f
+            : ceilf(crossing);
+
+        if (first_rejected <= (float)span_begin)
+            return false;
+
+        if (first_rejected < (float)span_end)
+            span_end = (int)first_rejected;
+    }
+
+    return span_begin < span_end;
+}
+
 template <NAIVE_SWR_RENDER_TYPE RenderType>
 static void ImGui_ImplGDI_RenderTriangleCommand(
     ImU32* pixel_buffer,
@@ -1891,8 +1955,7 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         return;
     }
 
-    if (RenderType ==
-        NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE)
+    if (RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE)
     {
         IM_ASSERT(
             color_1.Alpha > 0 &&
@@ -1919,70 +1982,36 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
             (size_t)y0 * framebuffer_width +
             x0;
 
+        const int maximum_span_width = x1 - x0;
+
         for (int y = y0; y < y1; ++y)
         {
-            float edge_1 = edge_1_row;
-            float edge_2 = edge_2_row;
-            float edge_3 = edge_3_row;
+            int span_begin = 0;
+            int span_end = maximum_span_width;
 
-            int x = x0;
+            const bool has_coverage =
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_1_row,
+                    edge_1_step_x,
+                    top_left_1,
+                    span_begin,
+                    span_end) &&
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_2_row,
+                    edge_2_step_x,
+                    top_left_2,
+                    span_begin,
+                    span_end) &&
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_3_row,
+                    edge_3_step_x,
+                    top_left_3,
+                    span_begin,
+                    span_end);
 
-            /*
-             * Search for the first covered pixel in this row.
-             */
-            while (x < x1)
+            if (has_coverage)
             {
-                const bool inside =
-                    edge_1 >= 0.0f &&
-                    edge_2 >= 0.0f &&
-                    edge_3 >= 0.0f &&
-                    (edge_1 != 0.0f || top_left_1) &&
-                    (edge_2 != 0.0f || top_left_2) &&
-                    (edge_3 != 0.0f || top_left_3);
-
-                if (inside)
-                    break;
-
-                ++x;
-
-                edge_1 += edge_1_step_x;
-                edge_2 += edge_2_step_x;
-                edge_3 += edge_3_step_x;
-            }
-
-            const int span_x0 = x;
-
-            if (span_x0 < x1)
-            {
-                /*
-                 * The intersection of a triangle and a horizontal
-                 * sample row is contiguous. Starting from the first
-                 * covered pixel, find the first pixel outside it.
-                 */
-                for (;;)
-                {
-                    ++x;
-
-                    edge_1 += edge_1_step_x;
-                    edge_2 += edge_2_step_x;
-                    edge_3 += edge_3_step_x;
-
-                    if (x >= x1)
-                        break;
-
-                    const bool inside =
-                        edge_1 >= 0.0f &&
-                        edge_2 >= 0.0f &&
-                        edge_3 >= 0.0f &&
-                        (edge_1 != 0.0f || top_left_1) &&
-                        (edge_2 != 0.0f || top_left_2) &&
-                        (edge_3 != 0.0f || top_left_3);
-
-                    if (!inside)
-                        break;
-                }
-
-                const int span_width = x - span_x0;
+                const int span_width = span_end - span_begin;
 
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
                 covered_pixel_count +=
@@ -1990,7 +2019,7 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 #endif
 
                 ImGui_ImplGDI_BlendConstantSpan(
-                    destination_row + (span_x0 - x0),
+                    destination_row + span_begin,
                     (size_t)span_width,
                     blend_state);
             }
