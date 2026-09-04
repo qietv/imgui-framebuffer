@@ -194,6 +194,10 @@ uint32_t naive_swr_make_render_command(
         return 3;
     }
 
+    const ImU32 color_difference =
+        (vertices[0]->col ^ vertices[1]->col) |
+        (vertices[0]->col ^ vertices[2]->col);
+
     const bool texture_is_white =
         naive_swr_is_white_texture_coordinate(
             vertices[0]->uv, white_texture_coordinate) &&
@@ -204,10 +208,6 @@ uint32_t naive_swr_make_render_command(
 
     if (texture_is_white)
     {
-        const ImU32 color_difference =
-            (vertices[0]->col ^ vertices[1]->col) |
-            (vertices[0]->col ^ vertices[2]->col);
-
         if (color_difference == 0)
         {
             render_command->Type =
@@ -243,9 +243,24 @@ uint32_t naive_swr_make_render_command(
             vertices[i]->uv.y;
     }
 
-    render_command->Type = texture_format == ImTextureFormat_Alpha8
-        ? NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE
-        : NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE;
+    if (texture_format == ImTextureFormat_Alpha8)
+    {
+        if (color_difference == 0)
+        {
+            render_command->Type =
+                render_command->Command.Triangle.Colors[0].Alpha == 255
+                ? NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE
+                : NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE;
+        }
+        else
+        {
+            render_command->Type = NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE;
+        }
+    }
+    else
+    {
+        render_command->Type = NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE;
+    }
 
     return 3;
 }
@@ -273,13 +288,27 @@ uint32_t naive_swr_make_render_command(
 #include <stdarg.h>
 #include <stdio.h>
 
+enum ImGui_ImplGDI_TriangleVertexColorClass
+{
+    ImGui_ImplGDI_TriangleVertexColor_UniformOpaque,
+    ImGui_ImplGDI_TriangleVertexColor_UniformTranslucent,
+    ImGui_ImplGDI_TriangleVertexColor_ConstantRGBVaryingAlpha,
+    ImGui_ImplGDI_TriangleVertexColor_General,
+    ImGui_ImplGDI_TriangleVertexColor_Count
+};
+
 enum ImGui_ImplGDI_TriangleStatsClass
 {
     ImGui_ImplGDI_TriangleStats_SolidUniformOpaque,
     ImGui_ImplGDI_TriangleStats_SolidUniformTranslucent,
     ImGui_ImplGDI_TriangleStats_SolidConstantRGBVaryingAlpha,
     ImGui_ImplGDI_TriangleStats_SolidGeneralVertexColor,
-    ImGui_ImplGDI_TriangleStats_Alpha8Textured,
+
+    ImGui_ImplGDI_TriangleStats_Alpha8UniformOpaque,
+    ImGui_ImplGDI_TriangleStats_Alpha8UniformTranslucent,
+    ImGui_ImplGDI_TriangleStats_Alpha8ConstantRGBVaryingAlpha,
+    ImGui_ImplGDI_TriangleStats_Alpha8GeneralVertexColor,
+
     ImGui_ImplGDI_TriangleStats_RGBA32Textured,
     ImGui_ImplGDI_TriangleStats_Count
 };
@@ -359,8 +388,8 @@ static void ImGui_ImplGDI_PrintRectanglePathStats(
         (double)statistics.PixelCount / frame_count);
 }
 
-static ImGui_ImplGDI_TriangleStatsClass
-ImGui_ImplGDI_ClassifySolidTriangle(
+static ImGui_ImplGDI_TriangleVertexColorClass
+ImGui_ImplGDI_ClassifyTriangleVertexColor(
     const NAIVE_SWR_COLOR& color_1,
     const NAIVE_SWR_COLOR& color_2,
     const NAIVE_SWR_COLOR& color_3)
@@ -380,16 +409,29 @@ ImGui_ImplGDI_ClassifySolidTriangle(
     if (rgb_is_uniform && alpha_is_uniform)
     {
         return color_1.Alpha == 255
-            ? ImGui_ImplGDI_TriangleStats_SolidUniformOpaque
-            : ImGui_ImplGDI_TriangleStats_SolidUniformTranslucent;
+            ? ImGui_ImplGDI_TriangleVertexColor_UniformOpaque
+            : ImGui_ImplGDI_TriangleVertexColor_UniformTranslucent;
     }
 
     if (rgb_is_uniform)
     {
-        return ImGui_ImplGDI_TriangleStats_SolidConstantRGBVaryingAlpha;
+        return
+            ImGui_ImplGDI_TriangleVertexColor_ConstantRGBVaryingAlpha;
     }
 
-    return ImGui_ImplGDI_TriangleStats_SolidGeneralVertexColor;
+    return ImGui_ImplGDI_TriangleVertexColor_General;
+}
+
+static ImGui_ImplGDI_TriangleStatsClass ImGui_ImplGDI_GetTriangleStatsClass(
+    bool is_alpha8_textured,
+    ImGui_ImplGDI_TriangleVertexColorClass vertex_color_class)
+{
+    const int first_class = is_alpha8_textured
+        ? (int)ImGui_ImplGDI_TriangleStats_Alpha8UniformOpaque
+        : (int)ImGui_ImplGDI_TriangleStats_SolidUniformOpaque;
+
+    return (ImGui_ImplGDI_TriangleStatsClass)(
+        first_class + (int)vertex_color_class);
 }
 
 static void ImGui_ImplGDI_EndStatisticsFrame()
@@ -407,7 +449,12 @@ static void ImGui_ImplGDI_EndStatisticsFrame()
         "Solid uniform translucent",
         "Solid constant RGB / varying alpha",
         "Solid general vertex color",
-        "Alpha8 textured",
+
+        "Alpha8 uniform color / alpha 255",
+        "Alpha8 uniform color / alpha 1-254",
+        "Alpha8 constant RGB / varying alpha",
+        "Alpha8 general vertex RGBA",
+
         "RGBA32 textured"
     };
 
@@ -1600,7 +1647,9 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         RenderType == NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE ||
         RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE ||
         RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE ||
-        RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE);
+        RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE);
 
     if (!pixel_buffer ||
         framebuffer_width <= 0 ||
@@ -1609,8 +1658,15 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         return;
     }
 
-    const bool is_textured =
+    const bool is_alpha8_textured =
         RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE ||
+        RenderType ==
+        NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE ||
+        RenderType ==
+        NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE;
+
+    const bool is_textured =
+        is_alpha8_textured ||
         RenderType == NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE;
 
     if (is_textured)
@@ -1740,39 +1796,23 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
     const NAIVE_SWR_COLOR& color_3 = triangle.Colors[2];
 
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
-    ImGui_ImplGDI_TriangleStatsClass statistics_class =
-        ImGui_ImplGDI_TriangleStats_RGBA32Textured;
+    ImGui_ImplGDI_TriangleStatsClass statistics_class;
 
-    if (RenderType ==
-        NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE)
+    if (RenderType == NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE)
     {
-        statistics_class =
-            ImGui_ImplGDI_TriangleStats_SolidUniformOpaque;
+        statistics_class = ImGui_ImplGDI_TriangleStats_RGBA32Textured;
     }
-    else if (RenderType ==
-        NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE)
+    else
     {
-        statistics_class =
-            ImGui_ImplGDI_TriangleStats_SolidUniformTranslucent;
-    }
-    else if (RenderType ==
-        NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE)
-    {
-        statistics_class =
-            ImGui_ImplGDI_TriangleStats_SolidConstantRGBVaryingAlpha;
-    }
-    else if (RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE)
-    {
-        statistics_class = ImGui_ImplGDI_ClassifySolidTriangle(
-            color_1,
-            color_2,
-            color_3);
-    }
-    else if (
-        RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE)
-    {
-        statistics_class =
-            ImGui_ImplGDI_TriangleStats_Alpha8Textured;
+        const ImGui_ImplGDI_TriangleVertexColorClass vertex_color_class =
+            ImGui_ImplGDI_ClassifyTriangleVertexColor(
+                color_1,
+                color_2,
+                color_3);
+
+        statistics_class = ImGui_ImplGDI_GetTriangleStatsClass(
+            is_alpha8_textured,
+            vertex_color_class);
     }
 
     ImGui_ImplGDI_TrianglePathStats& path_statistics =
@@ -2060,6 +2100,137 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
     const uint8_t* texture_bytes = texture ? texture->Pixels : nullptr;
 
+    if (RenderType ==
+        NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE ||
+        RenderType ==
+        NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE)
+    {
+        const int source_red = color_1.Red;
+        const int source_green = color_1.Green;
+        const int source_blue = color_1.Blue;
+        const int tint_alpha = color_1.Alpha;
+
+        if (RenderType ==
+            NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE)
+        {
+            IM_ASSERT(tint_alpha == 255);
+        }
+        else
+        {
+            IM_ASSERT(tint_alpha > 0 && tint_alpha < 255);
+        }
+
+        for (int y = y0; y < y1; ++y)
+        {
+            float edge_1 = edge_1_row;
+            float edge_2 = edge_2_row;
+            float edge_3 = edge_3_row;
+
+            for (int x = x0; x < x1; ++x)
+            {
+                const bool inside =
+                    edge_1 >= 0.0f &&
+                    edge_2 >= 0.0f &&
+                    edge_3 >= 0.0f &&
+                    (edge_1 != 0.0f || top_left_1) &&
+                    (edge_2 != 0.0f || top_left_2) &&
+                    (edge_3 != 0.0f || top_left_3);
+
+                if (inside)
+                {
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+                    ++covered_pixel_count;
+#endif
+
+                    const float weight_1 =
+                        edge_1 * inverse_area;
+
+                    const float weight_2 =
+                        edge_2 * inverse_area;
+
+                    const float weight_3 =
+                        edge_3 * inverse_area;
+
+                    /*
+                     * Keep the existing UV interpolation and sampling
+                     * order unchanged for this experiment.
+                     */
+                    const float texture_u =
+                        triangle.TextureCoordinates[0].U * weight_1 +
+                        triangle.TextureCoordinates[1].U * weight_2 +
+                        triangle.TextureCoordinates[2].U * weight_3;
+
+                    const float texture_v =
+                        triangle.TextureCoordinates[0].V * weight_1 +
+                        triangle.TextureCoordinates[1].V * weight_2 +
+                        triangle.TextureCoordinates[2].V * weight_3;
+
+                    int texture_x =
+                        (int)(texture_u * texture->Width);
+
+                    int texture_y =
+                        (int)(texture_v * texture->Height);
+
+                    texture_x = IMGUI_IMPL_GDI_CLAMP(
+                        texture_x,
+                        0,
+                        texture->Width - 1);
+
+                    texture_y = IMGUI_IMPL_GDI_CLAMP(
+                        texture_y,
+                        0,
+                        texture->Height - 1);
+
+                    const size_t texture_index =
+                        (size_t)texture_y * texture->Width +
+                        texture_x;
+
+                    const int texture_alpha =
+                        texture_bytes[texture_index];
+
+                    /*
+                     * RenderType is a compile-time template argument.
+                     * MSVC should eliminate the unused side completely.
+                     */
+                    const int source_alpha =
+                        RenderType ==
+                        NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE
+                        ? texture_alpha
+                        : ImGui_ImplGDI_Mul255(
+                            texture_alpha,
+                            tint_alpha);
+
+                    ImU32* destination =
+                        pixel_buffer +
+                        (size_t)y * framebuffer_width +
+                        x;
+
+                    ImGui_ImplGDI_BlendOver(
+                        destination,
+                        source_red,
+                        source_green,
+                        source_blue,
+                        source_alpha);
+                }
+
+                edge_1 += edge_1_step_x;
+                edge_2 += edge_2_step_x;
+                edge_3 += edge_3_step_x;
+            }
+
+            edge_1_row += edge_1_step_y;
+            edge_2_row += edge_2_step_y;
+            edge_3_row += edge_3_step_y;
+        }
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+        path_statistics.CoveredPixelCount +=
+            covered_pixel_count;
+#endif
+
+        return;
+    }
+
     for (int y = y0; y < y1; ++y)
     {
         float edge_1 = edge_1_row;
@@ -2160,8 +2331,7 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                         (size_t)texture_y * texture->Width +
                         texture_x;
 
-                    if (RenderType ==
-                        NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE)
+                    if (is_alpha8_textured)
                     {
                         const int texture_alpha =
                             texture_bytes[texture_index];
@@ -2326,6 +2496,28 @@ static void ImGui_ImplGDI_RenderCommand(
                 framebuffer_height,
                 clip_rect,
                 nullptr,
+                render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE:
+        ImGui_ImplGDI_RenderTriangleCommand<
+            NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                texture,
+                render_command);
+        return;
+
+    case NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE:
+        ImGui_ImplGDI_RenderTriangleCommand<
+            NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE>(
+                pixel_buffer,
+                framebuffer_width,
+                framebuffer_height,
+                clip_rect,
+                texture,
                 render_command);
         return;
 
