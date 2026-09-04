@@ -26,6 +26,9 @@
     <ClCompile Include="..\..\backends\imgui_impl_gdi.cpp">
       <Filter>backends</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\backends\naive_swr.c">
+      <Filter>backends</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="imgui">
