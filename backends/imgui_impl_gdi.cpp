@@ -341,6 +341,30 @@ struct ImGui_ImplGDI_RectanglePathStats
     uint64_t PixelCount;
 };
 
+static const int ImGui_ImplGDI_RenderTypeStatsCount = 12;
+
+struct ImGui_ImplGDI_CanonicalPairStats
+{
+    uint64_t QuadIndexPairCount;
+    uint64_t SameRenderTypePairCount;
+};
+
+struct ImGui_ImplGDI_Type9PairTopologyStats
+{
+    uint64_t PairCount;
+    uint64_t StrictlyConvexCount;
+
+    uint64_t ConstantABCDAlphaEdgesCount;
+    uint64_t OneZeroAlphaEdgeCount;
+    uint64_t ConvexOneZeroAlphaEdgeCount;
+
+    uint64_t ZeroToOpaqueCount;
+    uint64_t ZeroToTranslucentCount;
+
+    uint64_t SingleAffinePlaneExactCount;
+    uint64_t SingleAffinePlaneHalfAlphaCount;
+};
+
 struct ImGui_ImplGDI_Stats
 {
     uint64_t FrameCount;
@@ -356,6 +380,14 @@ struct ImGui_ImplGDI_Stats
     ImGui_ImplGDI_RectanglePathStats A8RectanglesContiguousX;
     ImGui_ImplGDI_RectanglePathStats A8RectanglesContiguousXY;
     ImGui_ImplGDI_RectanglePathStats A8RectanglesContiguousXOpaqueTint;
+
+    uint64_t GeneratedRenderCommandCount[
+        ImGui_ImplGDI_RenderTypeStatsCount];
+
+    ImGui_ImplGDI_CanonicalPairStats CanonicalPairs[
+        ImGui_ImplGDI_RenderTypeStatsCount];
+
+    ImGui_ImplGDI_Type9PairTopologyStats Type9PairTopology;
 };
 
 static ImGui_ImplGDI_Stats g_ImGui_ImplGDI_Stats = {};
@@ -389,6 +421,57 @@ static void ImGui_ImplGDI_StatsDebugPrint(
     va_end(arguments);
 
     ::OutputDebugStringA(buffer);
+}
+
+static float ImGui_ImplGDI_StatsCross(
+    const ImVec2& a,
+    const ImVec2& b,
+    const ImVec2& c)
+{
+    return
+        (b.x - a.x) * (c.y - a.y) -
+        (b.y - a.y) * (c.x - a.x);
+}
+
+static bool ImGui_ImplGDI_StatsIsStrictlyConvexQuad(
+    const ImVec2& a,
+    const ImVec2& b,
+    const ImVec2& c,
+    const ImVec2& d)
+{
+    const float turn_1 =
+        ImGui_ImplGDI_StatsCross(a, b, c);
+
+    const float turn_2 =
+        ImGui_ImplGDI_StatsCross(b, c, d);
+
+    const float turn_3 =
+        ImGui_ImplGDI_StatsCross(c, d, a);
+
+    const float turn_4 =
+        ImGui_ImplGDI_StatsCross(d, a, b);
+
+    return
+        (turn_1 > 0.0f &&
+            turn_2 > 0.0f &&
+            turn_3 > 0.0f &&
+            turn_4 > 0.0f) ||
+        (turn_1 < 0.0f &&
+            turn_2 < 0.0f &&
+            turn_3 < 0.0f &&
+            turn_4 < 0.0f);
+}
+
+static double ImGui_ImplGDI_StatsEdge(
+    const ImVec2& a,
+    const ImVec2& b,
+    const ImVec2& point)
+{
+    return
+        ((double)point.x - (double)a.x) *
+        ((double)b.y - (double)a.y) -
+        ((double)point.y - (double)a.y) *
+        ((double)b.x - (double)a.x);
 }
 
 static void ImGui_ImplGDI_PrintRectanglePathStats(
@@ -447,6 +530,43 @@ static ImGui_ImplGDI_TriangleStatsClass ImGui_ImplGDI_GetTriangleStatsClass(
 
     return (ImGui_ImplGDI_TriangleStatsClass)(
         first_class + (int)vertex_color_class);
+}
+
+static void ImGui_ImplGDI_PrintCanonicalPairStats(
+    const char* name,
+    NAIVE_SWR_RENDER_TYPE render_type,
+    double frame_count)
+{
+    const unsigned int type_index =
+        (unsigned int)render_type;
+
+    const uint64_t generated_command_count =
+        g_ImGui_ImplGDI_Stats
+        .GeneratedRenderCommandCount[type_index];
+
+    const ImGui_ImplGDI_CanonicalPairStats& statistics =
+        g_ImGui_ImplGDI_Stats
+        .CanonicalPairs[type_index];
+
+    const uint64_t represented_command_count =
+        statistics.SameRenderTypePairCount * 2;
+
+    const double paired_command_percentage =
+        generated_command_count != 0
+        ? (double)represented_command_count * 100.0 /
+        (double)generated_command_count
+        : 0.0;
+
+    ImGui_ImplGDI_StatsDebugPrint(
+        "%-38s generated/frame=%8.2f"
+        "  quad-index-pairs/frame=%8.2f"
+        "  same-type-pairs/frame=%8.2f"
+        "  paired commands=%6.2f%%\n",
+        name,
+        (double)generated_command_count / frame_count,
+        (double)statistics.QuadIndexPairCount / frame_count,
+        (double)statistics.SameRenderTypePairCount / frame_count,
+        paired_command_percentage);
 }
 
 static void ImGui_ImplGDI_EndStatisticsFrame()
@@ -546,6 +666,87 @@ static void ImGui_ImplGDI_EndStatisticsFrame()
         g_ImGui_ImplGDI_Stats
         .A8RectanglesContiguousXOpaqueTint,
         frame_count);
+
+    ImGui_ImplGDI_PrintCanonicalPairStats(
+        "Type 7 canonical pairs",
+        NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE,
+        frame_count);
+
+    ImGui_ImplGDI_PrintCanonicalPairStats(
+        "Type 8 canonical pairs",
+        NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE,
+        frame_count);
+
+    ImGui_ImplGDI_PrintCanonicalPairStats(
+        "Type 9 canonical pairs",
+        NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE,
+        frame_count);
+
+    ImGui_ImplGDI_PrintCanonicalPairStats(
+        "Type 10 canonical pairs",
+        NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE,
+        frame_count);
+
+    ImGui_ImplGDI_PrintCanonicalPairStats(
+        "Type 11 canonical pairs",
+        NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE,
+        frame_count);
+
+    const ImGui_ImplGDI_Type9PairTopologyStats&
+        type9_topology =
+        g_ImGui_ImplGDI_Stats.Type9PairTopology;
+
+    const double type9_pair_count =
+        (double)type9_topology.PairCount;
+
+    ImGui_ImplGDI_StatsDebugPrint(
+        "Type 9 pair topology:"
+        " pairs/frame=%8.2f"
+        "  convex=%6.2f%%"
+        "  constant AB/CD alpha=%6.2f%%\n"
+        "                      one zero edge=%6.2f%%"
+        "  convex zero-edge=%6.2f%%"
+        "  zero->opaque=%6.2f%%"
+        "  zero->translucent=%6.2f%%\n"
+        "                      single affine exact=%6.2f%%"
+        "  affine error <= 0.5=%6.2f%%\n",
+        type9_pair_count / frame_count,
+        type9_pair_count != 0.0
+        ? (double)type9_topology.StrictlyConvexCount *
+        100.0 / type9_pair_count
+        : 0.0,
+        type9_pair_count != 0.0
+        ? (double)type9_topology
+        .ConstantABCDAlphaEdgesCount *
+        100.0 / type9_pair_count
+        : 0.0,
+        type9_pair_count != 0.0
+        ? (double)type9_topology.OneZeroAlphaEdgeCount *
+        100.0 / type9_pair_count
+        : 0.0,
+        type9_pair_count != 0.0
+        ? (double)type9_topology
+        .ConvexOneZeroAlphaEdgeCount *
+        100.0 / type9_pair_count
+        : 0.0,
+        type9_pair_count != 0.0
+        ? (double)type9_topology.ZeroToOpaqueCount *
+        100.0 / type9_pair_count
+        : 0.0,
+        type9_pair_count != 0.0
+        ? (double)type9_topology.ZeroToTranslucentCount *
+        100.0 / type9_pair_count
+        : 0.0,
+        type9_pair_count != 0.0
+        ? (double)type9_topology
+        .SingleAffinePlaneExactCount *
+        100.0 / type9_pair_count
+        : 0.0,
+        type9_pair_count != 0.0
+        ? (double)type9_topology
+        .SingleAffinePlaneHalfAlphaCount *
+        100.0 / type9_pair_count
+        : 0.0);
 
     memset(
         &g_ImGui_ImplGDI_Stats,
@@ -3137,7 +3338,12 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
 
                 ImGui_ImplGDI_Texture* texture = (ImGui_ImplGDI_Texture*)pcmd->GetTexID();
 
-                for (unsigned int elem_i = 0; elem_i < pcmd->ElemCount;)
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+                bool skip_quad_pair_probe = false;
+#endif
+
+                for (unsigned int elem_i = 0;
+                    elem_i < pcmd->ElemCount;)
                 {
                     NAIVE_SWR_RENDER_COMMAND render_command;
 
@@ -3146,16 +3352,277 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
                         "Invalid GDI texture!");
 
                     if (!texture)
-                        continue;
+                        break;
 
-                    elem_i += naive_swr_make_render_command(
-                        vtx_buffer,
-                        idx_buffer + elem_i,
-                        pcmd->ElemCount - elem_i,
-                        texture->Format,
-                        texture->Width,
-                        texture->Height,
-                        &render_command);
+                    const uint32_t remaining_element_count =
+                        (uint32_t)(pcmd->ElemCount - elem_i);
+
+                    const ImDrawIdx* current_index_buffer =
+                        idx_buffer + elem_i;
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+                    const bool allow_canonical_pair_probe =
+                        !skip_quad_pair_probe;
+
+                    skip_quad_pair_probe = false;
+
+                    ImDrawIdx quad_vertex_indices[4] = {};
+                    bool has_quad_pair_indexes = false;
+
+                    if (remaining_element_count >= 6)
+                    {
+                        const ImDrawIdx a =
+                            current_index_buffer[0];
+
+                        const ImDrawIdx b =
+                            current_index_buffer[1];
+
+                        const ImDrawIdx c =
+                            current_index_buffer[2];
+
+                        int d_offset = -1;
+
+                        if (current_index_buffer[3] == a &&
+                            current_index_buffer[4] == c)
+                        {
+                            // A,B,C, A,C,D
+                            d_offset = 5;
+                        }
+                        else if (
+                            current_index_buffer[3] == c &&
+                            current_index_buffer[5] == a)
+                        {
+                            // A,B,C, C,D,A
+                            d_offset = 4;
+                        }
+                        else if (
+                            current_index_buffer[4] == a &&
+                            current_index_buffer[5] == c)
+                        {
+                            // A,B,C, D,A,C
+                            d_offset = 3;
+                        }
+
+                        if (d_offset >= 0)
+                        {
+                            quad_vertex_indices[0] = a;
+                            quad_vertex_indices[1] = b;
+                            quad_vertex_indices[2] = c;
+                            quad_vertex_indices[3] =
+                                current_index_buffer[d_offset];
+
+                            has_quad_pair_indexes = true;
+                        }
+                    }
+#endif
+
+                    const uint32_t consumed_element_count =
+                        naive_swr_make_render_command(
+                            vtx_buffer,
+                            current_index_buffer,
+                            remaining_element_count,
+                            texture->Format,
+                            texture->Width,
+                            texture->Height,
+                            &render_command);
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+                    const unsigned int render_type_index =
+                        (unsigned int)render_command.Type;
+
+                    if (render_type_index <
+                        ImGui_ImplGDI_RenderTypeStatsCount)
+                    {
+                        ++g_ImGui_ImplGDI_Stats
+                            .GeneratedRenderCommandCount[
+                                render_type_index];
+                    }
+
+                    if (allow_canonical_pair_probe &&
+                        consumed_element_count == 3 &&
+                        has_quad_pair_indexes &&
+                        render_type_index <
+                        ImGui_ImplGDI_RenderTypeStatsCount)
+                    {
+                        ImGui_ImplGDI_CanonicalPairStats& pair_statistics =
+                            g_ImGui_ImplGDI_Stats
+                            .CanonicalPairs[render_type_index];
+
+                        ++pair_statistics.QuadIndexPairCount;
+
+                        /*
+                         * Force triangle classification for the second half. Passing
+                         * exactly three elements prevents the look-ahead operation
+                         * from attempting rectangle recognition with later indexes.
+                         */
+                        NAIVE_SWR_RENDER_COMMAND second_render_command;
+
+                        const uint32_t second_consumed_element_count =
+                            naive_swr_make_render_command(
+                                vtx_buffer,
+                                current_index_buffer + 3,
+                                3,
+                                texture->Format,
+                                texture->Width,
+                                texture->Height,
+                                &second_render_command);
+
+                        IM_ASSERT(second_consumed_element_count == 3);
+                        (void)second_consumed_element_count;
+
+                        if (second_render_command.Type ==
+                            render_command.Type)
+                        {
+                            ++pair_statistics.SameRenderTypePairCount;
+
+                            if (render_command.Type ==
+                                NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE)
+                            {
+                                ImGui_ImplGDI_Type9PairTopologyStats& topology =
+                                    g_ImGui_ImplGDI_Stats.Type9PairTopology;
+
+                                ++topology.PairCount;
+
+                                const ImDrawVert& vertex_a =
+                                    vtx_buffer[quad_vertex_indices[0]];
+
+                                const ImDrawVert& vertex_b =
+                                    vtx_buffer[quad_vertex_indices[1]];
+
+                                const ImDrawVert& vertex_c =
+                                    vtx_buffer[quad_vertex_indices[2]];
+
+                                const ImDrawVert& vertex_d =
+                                    vtx_buffer[quad_vertex_indices[3]];
+
+                                const unsigned int alpha_a =
+                                    (vertex_a.col >> IM_COL32_A_SHIFT) & 0xFFu;
+
+                                const unsigned int alpha_b =
+                                    (vertex_b.col >> IM_COL32_A_SHIFT) & 0xFFu;
+
+                                const unsigned int alpha_c =
+                                    (vertex_c.col >> IM_COL32_A_SHIFT) & 0xFFu;
+
+                                const unsigned int alpha_d =
+                                    (vertex_d.col >> IM_COL32_A_SHIFT) & 0xFFu;
+
+                                const bool strictly_convex =
+                                    ImGui_ImplGDI_StatsIsStrictlyConvexQuad(
+                                        vertex_a.pos,
+                                        vertex_b.pos,
+                                        vertex_c.pos,
+                                        vertex_d.pos);
+
+                                if (strictly_convex)
+                                    ++topology.StrictlyConvexCount;
+
+                                const bool has_constant_alpha_edges =
+                                    alpha_a == alpha_b &&
+                                    alpha_c == alpha_d &&
+                                    alpha_a != alpha_c;
+
+                                if (has_constant_alpha_edges)
+                                {
+                                    ++topology.ConstantABCDAlphaEdgesCount;
+
+                                    const bool exactly_one_edge_is_zero =
+                                        (alpha_a == 0) !=
+                                        (alpha_c == 0);
+
+                                    if (exactly_one_edge_is_zero)
+                                    {
+                                        ++topology.OneZeroAlphaEdgeCount;
+
+                                        if (strictly_convex)
+                                        {
+                                            ++topology
+                                                .ConvexOneZeroAlphaEdgeCount;
+                                        }
+
+                                        const unsigned int nonzero_alpha =
+                                            alpha_a != 0
+                                            ? alpha_a
+                                            : alpha_c;
+
+                                        if (nonzero_alpha == 255)
+                                        {
+                                            ++topology.ZeroToOpaqueCount;
+                                        }
+                                        else
+                                        {
+                                            ++topology.ZeroToTranslucentCount;
+                                        }
+                                    }
+                                }
+
+                                /*
+                                 * Determine whether the alpha value at D lies on the affine
+                                 * plane established by A, B and C.
+                                 */
+                                const double area =
+                                    ImGui_ImplGDI_StatsEdge(
+                                        vertex_a.pos,
+                                        vertex_b.pos,
+                                        vertex_c.pos);
+
+                                if (area != 0.0)
+                                {
+                                    const double weight_a =
+                                        ImGui_ImplGDI_StatsEdge(
+                                            vertex_b.pos,
+                                            vertex_c.pos,
+                                            vertex_d.pos) /
+                                        area;
+
+                                    const double weight_b =
+                                        ImGui_ImplGDI_StatsEdge(
+                                            vertex_c.pos,
+                                            vertex_a.pos,
+                                            vertex_d.pos) /
+                                        area;
+
+                                    const double weight_c =
+                                        ImGui_ImplGDI_StatsEdge(
+                                            vertex_a.pos,
+                                            vertex_b.pos,
+                                            vertex_d.pos) /
+                                        area;
+
+                                    const double predicted_alpha_d =
+                                        (double)alpha_a * weight_a +
+                                        (double)alpha_b * weight_b +
+                                        (double)alpha_c * weight_c;
+
+                                    const double alpha_error =
+                                        fabs(
+                                            predicted_alpha_d -
+                                            (double)alpha_d);
+
+                                    if (alpha_error <= 0.000001)
+                                    {
+                                        ++topology
+                                            .SingleAffinePlaneExactCount;
+                                    }
+
+                                    if (alpha_error <= 0.5)
+                                    {
+                                        ++topology
+                                            .SingleAffinePlaneHalfAlphaCount;
+                                    }
+                                }
+                            }
+                        }
+
+                        /*
+                         * The next actual command is the second half of this pair;
+                         * do not consider it as the beginning of an overlapping pair.
+                         */
+                        skip_quad_pair_probe = true;
+                    }
+#endif
+
+                    elem_i += consumed_element_count;
 
                     ImGui_ImplGDI_RenderCommand(
                         pixel_buffer,
