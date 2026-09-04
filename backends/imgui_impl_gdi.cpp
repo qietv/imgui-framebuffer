@@ -2073,56 +2073,105 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
     const float inverse_area = 1.0f / normalized_area;
 
-    if (RenderType ==
-        NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE)
+    if (RenderType == NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE)
     {
         const int source_red = color_1.Red;
         const int source_green = color_1.Green;
         const int source_blue = color_1.Blue;
+
+        const float alpha_1 =
+            (float)color_1.Alpha;
+
+        const float alpha_2 =
+            (float)color_2.Alpha;
+
+        const float alpha_3 =
+            (float)color_3.Alpha;
+
+        /*
+         * Alpha is affine across the triangle. Build its value and
+         * derivatives once instead of calculating three barycentric
+         * weights and three weighted alpha terms for every covered
+         * pixel.
+         */
+        float alpha_row =
+            (alpha_1 * edge_1_row +
+                alpha_2 * edge_2_row +
+                alpha_3 * edge_3_row) *
+            inverse_area;
+
+        const float alpha_step_x =
+            (alpha_1 * edge_1_step_x +
+                alpha_2 * edge_2_step_x +
+                alpha_3 * edge_3_step_x) *
+            inverse_area;
+
+        const float alpha_step_y =
+            (alpha_1 * edge_1_step_y +
+                alpha_2 * edge_2_step_y +
+                alpha_3 * edge_3_step_y) *
+            inverse_area;
 
         ImU32* destination_row =
             pixel_buffer +
             (size_t)y0 * framebuffer_width +
             x0;
 
+        const int maximum_span_width = x1 - x0;
+
         for (int y = y0; y < y1; ++y)
         {
-            float edge_1 = edge_1_row;
-            float edge_2 = edge_2_row;
-            float edge_3 = edge_3_row;
+            int span_begin = 0;
+            int span_end = maximum_span_width;
 
-            ImU32* destination = destination_row;
+            const bool has_coverage =
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_1_row,
+                    edge_1_step_x,
+                    top_left_1,
+                    span_begin,
+                    span_end) &&
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_2_row,
+                    edge_2_step_x,
+                    top_left_2,
+                    span_begin,
+                    span_end) &&
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_3_row,
+                    edge_3_step_x,
+                    top_left_3,
+                    span_begin,
+                    span_end);
 
-            for (int x = x0; x < x1; ++x)
+            if (has_coverage)
             {
-                const bool inside =
-                    edge_1 >= 0.0f &&
-                    edge_2 >= 0.0f &&
-                    edge_3 >= 0.0f &&
-                    (edge_1 != 0.0f || top_left_1) &&
-                    (edge_2 != 0.0f || top_left_2) &&
-                    (edge_3 != 0.0f || top_left_3);
+                /*
+                 * Advance alpha exactly as the current affine loop would
+                 * have done for the pixels preceding this span.
+                 */
+                float interpolated_alpha = alpha_row;
 
-                if (inside)
+                for (int offset = 0;
+                    offset < span_begin;
+                    ++offset)
                 {
+                    interpolated_alpha += alpha_step_x;
+                }
+
+                const int span_width =
+                    span_end - span_begin;
+
+                ImU32* destination = destination_row + span_begin;
+
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
-                    ++covered_pixel_count;
+                covered_pixel_count +=
+                    (uint64_t)span_width;
 #endif
 
-                    const float weight_1 =
-                        edge_1 * inverse_area;
-
-                    const float weight_2 =
-                        edge_2 * inverse_area;
-
-                    const float weight_3 =
-                        edge_3 * inverse_area;
-
-                    int source_alpha = (int)(
-                        color_1.Alpha * weight_1 +
-                        color_2.Alpha * weight_2 +
-                        color_3.Alpha * weight_3 +
-                        0.5f);
+                for (int offset = 0; offset < span_width; ++offset)
+                {
+                    int source_alpha = (int)(interpolated_alpha + 0.5f);
 
                     source_alpha = IMGUI_IMPL_GDI_CLAMP(
                         source_alpha,
@@ -2135,13 +2184,11 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                         source_green,
                         source_blue,
                         source_alpha);
+
+                    ++destination;
+
+                    interpolated_alpha += alpha_step_x;
                 }
-
-                ++destination;
-
-                edge_1 += edge_1_step_x;
-                edge_2 += edge_2_step_x;
-                edge_3 += edge_3_step_x;
             }
 
             destination_row += framebuffer_width;
@@ -2149,11 +2196,12 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
             edge_1_row += edge_1_step_y;
             edge_2_row += edge_2_step_y;
             edge_3_row += edge_3_step_y;
+
+            alpha_row += alpha_step_y;
         }
 
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
-        path_statistics.CoveredPixelCount +=
-            covered_pixel_count;
+        path_statistics.CoveredPixelCount += covered_pixel_count;
 #endif
 
         return;
