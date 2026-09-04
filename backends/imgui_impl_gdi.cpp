@@ -498,7 +498,8 @@ struct ImGui_ImplGDI_Texture
 {
     int Width;
     int Height;
-    ImU32* Pixels;
+    ImTextureFormat Format;
+    uint8_t* Pixels;
 
     ImGui_ImplGDI_Texture()
     {
@@ -506,51 +507,215 @@ struct ImGui_ImplGDI_Texture
     }
 };
 
-static void ImGui_ImplGDI_UpdateTexture(ImTextureData* tex)
+static bool ImGui_ImplGDI_RGBA32TextureCanUseAlpha8(
+    const uint8_t* pixels,
+    size_t pixel_count)
+{
+    for (size_t index = 0; index < pixel_count; ++index)
+    {
+        const uint8_t* texel =
+            pixels + index * 4;
+
+        /*
+         * RGB is irrelevant for a fully transparent texel under
+         * nearest-neighbor straight-alpha rendering.
+         */
+        if (texel[3] != 0 &&
+            (texel[0] != 255 ||
+                texel[1] != 255 ||
+                texel[2] != 255))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool ImGui_ImplGDI_UploadTexturePixels(
+    ImGui_ImplGDI_Texture* texture,
+    ImTextureData* tex)
+{
+    IM_ASSERT(texture != nullptr);
+    IM_ASSERT(tex != nullptr);
+
+    if (tex->Width <= 0 || tex->Height <= 0)
+        return false;
+
+    if (tex->Format != ImTextureFormat_Alpha8 &&
+        tex->Format != ImTextureFormat_RGBA32)
+    {
+        IM_ASSERT(false && "Unsupported texture format!");
+        return false;
+    }
+
+    const uint8_t* source_pixels =
+        reinterpret_cast<const uint8_t*>(
+            tex->GetPixels());
+
+    if (!source_pixels)
+        return false;
+
+    const size_t pixel_count =
+        (size_t)tex->Width * (size_t)tex->Height;
+
+    ImTextureFormat internal_format =
+        tex->Format;
+
+    /*
+     * RGBA32 textures whose RGB channels are entirely white are
+     * equivalent to Alpha8 masks under the renderer's modulation
+     * rules:
+     *
+     * round(255 * vertex_color / 255) == vertex_color
+     */
+    if (tex->Format == ImTextureFormat_RGBA32 &&
+        ImGui_ImplGDI_RGBA32TextureCanUseAlpha8(
+            source_pixels,
+            pixel_count))
+    {
+        internal_format =
+            ImTextureFormat_Alpha8;
+    }
+
+    const size_t destination_byte_count =
+        internal_format == ImTextureFormat_Alpha8
+        ? pixel_count
+        : pixel_count * 4;
+
+    uint8_t* new_pixels =
+        (uint8_t*)IM_ALLOC(destination_byte_count);
+
+    if (!new_pixels)
+        return false;
+
+    if (internal_format == ImTextureFormat_Alpha8)
+    {
+        if (tex->Format == ImTextureFormat_Alpha8)
+        {
+            memcpy(
+                new_pixels,
+                source_pixels,
+                pixel_count);
+        }
+        else
+        {
+            /*
+             * Compress white-RGB RGBA32 into tightly packed Alpha8.
+             */
+            for (size_t index = 0;
+                index < pixel_count;
+                ++index)
+            {
+                new_pixels[index] =
+                    source_pixels[index * 4 + 3];
+            }
+        }
+    }
+    else
+    {
+        memcpy(
+            new_pixels,
+            source_pixels,
+            pixel_count * 4);
+    }
+
+    /*
+     * Allocate and populate the new buffer before releasing the old
+     * one, so a failed update leaves the previous texture intact.
+     */
+    if (texture->Pixels)
+        IM_FREE(texture->Pixels);
+
+    texture->Width = tex->Width;
+    texture->Height = tex->Height;
+    texture->Format = internal_format;
+    texture->Pixels = new_pixels;
+
+    return true;
+}
+
+static void ImGui_ImplGDI_UpdateTexture(
+    ImTextureData* tex)
 {
     if (tex->Status == ImTextureStatus_WantCreate)
     {
-        // Create and upload new texture to graphics system
-        //IMGUI_DEBUG_LOG("UpdateTexture #%03d: WantCreate %dx%d\n", tex->UniqueID, tex->Width, tex->Height);
-        IM_ASSERT(tex->TexID == ImTextureID_Invalid && tex->BackendUserData == nullptr);
-        IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
+        IM_ASSERT(
+            tex->TexID == ImTextureID_Invalid &&
+            tex->BackendUserData == nullptr);
 
-        ImGui_ImplGDI_Texture* texture = IM_NEW(ImGui_ImplGDI_Texture)();
-        IM_ASSERT(texture != nullptr && "Failed to allocate memory for texture data!");
-        texture->Width = tex->Width;
-        texture->Height = tex->Height;
-        texture->Pixels = (ImU32*)IM_ALLOC(texture->Width * texture->Height * sizeof(ImU32));
-        IM_ASSERT(texture->Pixels != nullptr && "Failed to allocate memory for texture pixels!");
-        memcpy(texture->Pixels, tex->GetPixels(), texture->Width * texture->Height * sizeof(ImU32));
+        ImGui_ImplGDI_Texture* texture =
+            IM_NEW(ImGui_ImplGDI_Texture)();
+
+        if (!texture)
+        {
+            IM_ASSERT(
+                false &&
+                "Failed to allocate texture object!");
+            return;
+        }
+
+        if (!ImGui_ImplGDI_UploadTexturePixels(
+            texture,
+            tex))
+        {
+            IM_DELETE(texture);
+
+            IM_ASSERT(
+                false &&
+                "Failed to upload texture pixels!");
+
+            return;
+        }
+
         tex->SetTexID((ImTextureID)texture);
+        tex->SetStatus(ImTextureStatus_OK);
+    }
+    else if (
+        tex->Status == ImTextureStatus_WantUpdates)
+    {
+        ImGui_ImplGDI_Texture* texture =
+            (ImGui_ImplGDI_Texture*)tex->GetTexID();
+
+        IM_ASSERT(
+            texture != nullptr &&
+            "Trying to update an invalid texture!");
+
+        if (!texture)
+            return;
+
+        if (!ImGui_ImplGDI_UploadTexturePixels(
+            texture,
+            tex))
+        {
+            IM_ASSERT(
+                false &&
+                "Failed to update texture pixels!");
+
+            return;
+        }
 
         tex->SetStatus(ImTextureStatus_OK);
     }
-    else if (tex->Status == ImTextureStatus_WantUpdates)
+    else if (
+        tex->Status == ImTextureStatus_WantDestroy)
     {
-        // Update selected blocks. We only ever write to textures regions which have never been used before!
-        // This backend choose to use tex->Updates[] but you can use tex->UpdateRect to upload a single region.
-        ImGui_ImplGDI_Texture* texture = (ImGui_ImplGDI_Texture*)tex->GetTexID();
-        IM_ASSERT(texture != nullptr && "Trying to update a texture that was not created or already destroyed!");
-        IM_ASSERT(texture->Pixels != nullptr && "Trying to update a texture that was not created or already destroyed!");
-        IM_FREE(texture->Pixels);
-        texture->Width = tex->Width;
-        texture->Height = tex->Height;
-        texture->Pixels = (ImU32*)IM_ALLOC(texture->Width * texture->Height * sizeof(ImU32));
-        IM_ASSERT(texture->Pixels != nullptr && "Failed to allocate memory for texture pixels!");
-        memcpy(texture->Pixels, tex->GetPixels(), texture->Width * texture->Height * sizeof(ImU32));
+        ImGui_ImplGDI_Texture* texture =
+            (ImGui_ImplGDI_Texture*)tex->GetTexID();
 
-        tex->SetStatus(ImTextureStatus_OK);
-    }
-    else if (tex->Status == ImTextureStatus_WantDestroy)
-    {
-        ImGui_ImplGDI_Texture* texture = (ImGui_ImplGDI_Texture*)tex->GetTexID();
-        IM_ASSERT(texture != nullptr && "Trying to destroy a texture that was not created or already destroyed!");
-        IM_ASSERT(texture->Pixels != nullptr && "Trying to destroy a texture that was not created or already destroyed!");
-        IM_FREE(texture->Pixels);
+        IM_ASSERT(
+            texture != nullptr &&
+            "Trying to destroy an invalid texture!");
+
+        if (!texture)
+            return;
+
+        if (texture->Pixels)
+            IM_FREE(texture->Pixels);
+
         IM_DELETE(texture);
-        tex->SetTexID(ImTextureID_Invalid);
 
+        tex->SetTexID(ImTextureID_Invalid);
         tex->SetStatus(ImTextureStatus_Destroyed);
     }
 }
@@ -1001,8 +1166,7 @@ static void ImGui_ImplGDI_RenderTexturedRectangleCommand(
         (((float)y0 + 0.5f) - rectangle.Position.Y) *
         texture_step_y;
 
-    const uint8_t* texture_bytes =
-        reinterpret_cast<const uint8_t*>(texture->Pixels);
+    const uint8_t* texture_bytes = texture->Pixels;
 
     for (int y = y0; y < y1; ++y)
     {
@@ -1579,10 +1743,7 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         return;
     }
 
-    const uint8_t* texture_bytes =
-        texture
-        ? reinterpret_cast<const uint8_t*>(texture->Pixels)
-        : nullptr;
+    const uint8_t* texture_bytes = texture ? texture->Pixels : nullptr;
 
     for (int y = y0; y < y1; ++y)
     {
@@ -1960,11 +2121,19 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
                 for (unsigned int elem_i = 0; elem_i < pcmd->ElemCount;)
                 {
                     NAIVE_SWR_RENDER_COMMAND render_command;
+
+                    IM_ASSERT(
+                        texture != nullptr &&
+                        "Invalid GDI texture!");
+
+                    if (!texture)
+                        continue;
+
                     elem_i += naive_swr_make_render_command(
                         vtx_buffer,
                         idx_buffer + elem_i,
                         pcmd->ElemCount - elem_i,
-                        ImTextureFormat_RGBA32,
+                        texture->Format,
                         texture->Width,
                         texture->Height,
                         &render_command);
