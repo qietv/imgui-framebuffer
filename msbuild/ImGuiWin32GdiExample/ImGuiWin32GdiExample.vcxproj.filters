@@ -63,5 +63,8 @@
     <ClInclude Include="..\..\backends\imgui_impl_gdi.h">
       <Filter>backends</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\backends\naive_swr.h">
+      <Filter>backends</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
