@@ -12,6 +12,9 @@
 
 #ifndef IMGUI_DISABLE
 
+#include <math.h>
+#include <string.h>
+
 static inline NAIVE_SWR_COLOR naive_swr_imgui_color_from_imgui(
     ImU32 Value)
 {
@@ -30,6 +33,133 @@ static inline bool naive_swr_imgui_is_white_uv(
     const ImVec2& WhiteUv)
 {
     return Coordinate.x == WhiteUv.x && Coordinate.y == WhiteUv.y;
+}
+
+static bool naive_swr_imgui_rgba32_texture_can_use_alpha8(
+    const uint8_t* Pixels,
+    size_t PixelCount)
+{
+    for (size_t Index = 0; Index < PixelCount; ++Index)
+    {
+        const uint8_t* Texel = Pixels + Index * 4;
+
+        /*
+         * RGB is irrelevant for a fully transparent texel under
+         * nearest-neighbor straight-alpha rendering.
+         */
+        if (Texel[3] != 0 &&
+            (Texel[0] != 255 ||
+                Texel[1] != 255 ||
+                Texel[2] != 255))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool naive_swr_imgui_create_texture(
+    ImTextureData* TextureData,
+    uint8_t** OwnedPixels,
+    PNAIVE_SWR_TEXTURE Texture)
+{
+    IM_ASSERT(TextureData != nullptr);
+    IM_ASSERT(OwnedPixels != nullptr);
+    IM_ASSERT(Texture != nullptr);
+
+    if (TextureData == nullptr ||
+        OwnedPixels == nullptr ||
+        Texture == nullptr)
+    {
+        return false;
+    }
+
+    if (TextureData->Width <= 0 || TextureData->Height <= 0)
+    {
+        return false;
+    }
+
+    if (TextureData->Format != ImTextureFormat_Alpha8 &&
+        TextureData->Format != ImTextureFormat_RGBA32)
+    {
+        IM_ASSERT(false && "Unsupported texture format!");
+        return false;
+    }
+
+    const uint8_t* SourcePixels =
+        (const uint8_t*)TextureData->GetPixels();
+
+    if (SourcePixels == nullptr)
+    {
+        return false;
+    }
+
+    const size_t PixelCount =
+        (size_t)TextureData->Width * (size_t)TextureData->Height;
+
+    ImTextureFormat InternalFormat = TextureData->Format;
+
+    /*
+     * RGBA32 textures whose RGB channels are entirely white are
+     * equivalent to Alpha8 masks under the renderer's modulation
+     * rules:
+     *
+     * round(255 * vertex_color / 255) == vertex_color
+     */
+    if (TextureData->Format == ImTextureFormat_RGBA32 &&
+        naive_swr_imgui_rgba32_texture_can_use_alpha8(
+            SourcePixels,
+            PixelCount))
+    {
+        InternalFormat = ImTextureFormat_Alpha8;
+    }
+
+    const size_t DestinationByteCount = InternalFormat == ImTextureFormat_Alpha8
+        ? PixelCount
+        : PixelCount * 4;
+
+    uint8_t* NewPixels = (uint8_t*)IM_ALLOC(DestinationByteCount);
+
+    if (NewPixels == nullptr)
+    {
+        return false;
+    }
+
+    if (InternalFormat == ImTextureFormat_Alpha8)
+    {
+        if (TextureData->Format == ImTextureFormat_Alpha8)
+        {
+            memcpy(NewPixels, SourcePixels, PixelCount);
+        }
+        else
+        {
+            for (size_t Index = 0; Index < PixelCount; ++Index)
+            {
+                NewPixels[Index] = SourcePixels[Index * 4 + 3];
+            }
+        }
+    }
+    else
+    {
+        memcpy(NewPixels, SourcePixels, PixelCount * 4);
+    }
+
+    NAIVE_SWR_TEXTURE NewTexture;
+    NewTexture.Pixels = NewPixels;
+    NewTexture.Width = TextureData->Width;
+    NewTexture.Height = TextureData->Height;
+    NewTexture.ByteStride = InternalFormat == ImTextureFormat_Alpha8
+        ? (size_t)TextureData->Width
+        : (size_t)TextureData->Width * 4;
+    NewTexture.Format = InternalFormat == ImTextureFormat_Alpha8
+        ? NAIVE_SWR_TEXTURE_FORMAT_ALPHA8
+        : NAIVE_SWR_TEXTURE_FORMAT_RGBA32;
+
+    *OwnedPixels = NewPixels;
+    *Texture = NewTexture;
+
+    return true;
 }
 
 uint32_t naive_swr_imgui_make_render_command(
@@ -235,19 +365,16 @@ uint32_t naive_swr_imgui_make_render_command(
 
 void naive_swr_imgui_render_draw_command(
     PCNAIVE_SWR_FRAMEBUFFER Framebuffer,
-    PCNAIVE_SWR_CLIP_RECT ClipRect,
     PCNAIVE_SWR_TEXTURE Texture,
     const ImDrawList* DrawList,
     const ImDrawCmd* DrawCommand)
 {
     IM_ASSERT(Framebuffer != nullptr);
-    IM_ASSERT(ClipRect != nullptr);
     IM_ASSERT(Texture != nullptr);
     IM_ASSERT(DrawList != nullptr);
     IM_ASSERT(DrawCommand != nullptr);
 
     if (Framebuffer == nullptr ||
-        ClipRect == nullptr ||
         Texture == nullptr ||
         DrawList == nullptr ||
         DrawCommand == nullptr)
@@ -259,6 +386,24 @@ void naive_swr_imgui_render_draw_command(
 
     if (DrawCommand->UserCallback != nullptr ||
         DrawCommand->ElemCount == 0)
+    {
+        return;
+    }
+
+    if (DrawCommand->ClipRect.z <= DrawCommand->ClipRect.x ||
+        DrawCommand->ClipRect.w <= DrawCommand->ClipRect.y)
+    {
+        return;
+    }
+
+    NAIVE_SWR_CLIP_RECT ClipRect;
+    ClipRect.Left = (int32_t)ceilf(DrawCommand->ClipRect.x - 0.5f);
+    ClipRect.Top = (int32_t)ceilf(DrawCommand->ClipRect.y - 0.5f);
+    ClipRect.Right = (int32_t)ceilf(DrawCommand->ClipRect.z - 0.5f);
+    ClipRect.Bottom = (int32_t)ceilf(DrawCommand->ClipRect.w - 0.5f);
+
+    if (ClipRect.Left >= ClipRect.Right ||
+        ClipRect.Top >= ClipRect.Bottom)
     {
         return;
     }
@@ -285,23 +430,73 @@ void naive_swr_imgui_render_draw_command(
         NAIVE_SWR_RENDER_COMMAND RenderCommand;
 
         const uint32_t ConsumedCount = naive_swr_imgui_make_render_command(
-                VertexBuffer,
-                IndexBuffer + ElementOffset,
-                RemainingCount,
-                Texture,
-                &RenderCommand);
+            VertexBuffer,
+            IndexBuffer + ElementOffset,
+            RemainingCount,
+            Texture,
+            &RenderCommand);
 
         IM_ASSERT(ConsumedCount == 3u || ConsumedCount == 6u);
         IM_ASSERT(ConsumedCount <= RemainingCount);
 
         naive_swr_render_command(
             Framebuffer,
-            ClipRect,
+            &ClipRect,
             Texture,
             &RenderCommand);
 
         ElementOffset += ConsumedCount;
     }
+}
+
+bool naive_swr_imgui_ensure_framebuffer_capacity(
+    uint32_t** FramebufferPixels,
+    size_t* FramebufferCapacity,
+    size_t RequiredPixelCount)
+{
+    IM_ASSERT(FramebufferPixels != nullptr);
+    IM_ASSERT(FramebufferCapacity != nullptr);
+
+    if (FramebufferPixels == nullptr ||
+        FramebufferCapacity == nullptr)
+    {
+        return false;
+    }
+
+    if (RequiredPixelCount == 0)
+    {
+        return true;
+    }
+
+    if (*FramebufferPixels != nullptr &&
+        *FramebufferCapacity >= RequiredPixelCount)
+    {
+        return true;
+    }
+
+    if (RequiredPixelCount > SIZE_MAX / sizeof(uint32_t))
+    {
+        return false;
+    }
+
+    const size_t RequiredByteCount = RequiredPixelCount * sizeof(uint32_t);
+
+    uint32_t* NewPixels = (uint32_t*)IM_ALLOC(RequiredByteCount);
+
+    if (NewPixels == nullptr)
+    {
+        return false;
+    }
+
+    if (*FramebufferPixels != nullptr)
+    {
+        IM_FREE(*FramebufferPixels);
+    }
+
+    *FramebufferPixels = NewPixels;
+    *FramebufferCapacity = RequiredPixelCount;
+
+    return true;
 }
 
 #endif // !IMGUI_DISABLE

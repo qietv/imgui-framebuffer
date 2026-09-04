@@ -30,7 +30,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <math.h>
+#include <string.h>
 
 // Clang/GCC warnings with -Weverything
 #if defined(__clang__)
@@ -55,28 +55,6 @@ static ImGui_ImplGDI_Data* ImGui_ImplGDI_GetBackendData()
         : nullptr;
 }
 
-static bool ImGui_ImplGDI_EnsureFramebufferCapacity(
-    ImGui_ImplGDI_Data* backend_data,
-    size_t required_pixel_count)
-{
-    if (backend_data->FramebufferCapacity >= required_pixel_count)
-        return true;
-
-    uint32_t* new_pixels = (uint32_t*)IM_ALLOC(
-        required_pixel_count * sizeof(uint32_t));
-
-    if (!new_pixels)
-        return false;
-
-    if (backend_data->FramebufferPixels)
-        IM_FREE(backend_data->FramebufferPixels);
-
-    backend_data->FramebufferPixels = new_pixels;
-    backend_data->FramebufferCapacity = required_pixel_count;
-
-    return true;
-}
-
 // Texture data
 struct ImGui_ImplGDI_Texture
 {
@@ -89,31 +67,6 @@ struct ImGui_ImplGDI_Texture
     }
 };
 
-static bool ImGui_ImplGDI_RGBA32TextureCanUseAlpha8(
-    const uint8_t* pixels,
-    size_t pixel_count)
-{
-    for (size_t index = 0; index < pixel_count; ++index)
-    {
-        const uint8_t* texel =
-            pixels + index * 4;
-
-        /*
-         * RGB is irrelevant for a fully transparent texel under
-         * nearest-neighbor straight-alpha rendering.
-         */
-        if (texel[3] != 0 &&
-            (texel[0] != 255 ||
-                texel[1] != 255 ||
-                texel[2] != 255))
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
 static bool ImGui_ImplGDI_UploadTexturePixels(
     ImGui_ImplGDI_Texture* texture,
     ImTextureData* tex)
@@ -121,104 +74,25 @@ static bool ImGui_ImplGDI_UploadTexturePixels(
     IM_ASSERT(texture != nullptr);
     IM_ASSERT(tex != nullptr);
 
-    if (tex->Width <= 0 || tex->Height <= 0)
+    if (texture == nullptr || tex == nullptr)
         return false;
 
-    if (tex->Format != ImTextureFormat_Alpha8 &&
-        tex->Format != ImTextureFormat_RGBA32)
+    uint8_t* new_pixels;
+    NAIVE_SWR_TEXTURE new_view;
+
+    if (!naive_swr_imgui_create_texture(
+        tex,
+        &new_pixels,
+        &new_view))
     {
-        IM_ASSERT(false && "Unsupported texture format!");
         return false;
     }
 
-    const uint8_t* source_pixels =
-        reinterpret_cast<const uint8_t*>(
-            tex->GetPixels());
-
-    if (!source_pixels)
-        return false;
-
-    const size_t pixel_count =
-        (size_t)tex->Width * (size_t)tex->Height;
-
-    ImTextureFormat internal_format =
-        tex->Format;
-
-    /*
-     * RGBA32 textures whose RGB channels are entirely white are
-     * equivalent to Alpha8 masks under the renderer's modulation
-     * rules:
-     *
-     * round(255 * vertex_color / 255) == vertex_color
-     */
-    if (tex->Format == ImTextureFormat_RGBA32 &&
-        ImGui_ImplGDI_RGBA32TextureCanUseAlpha8(
-            source_pixels,
-            pixel_count))
-    {
-        internal_format =
-            ImTextureFormat_Alpha8;
-    }
-
-    const size_t destination_byte_count =
-        internal_format == ImTextureFormat_Alpha8
-        ? pixel_count
-        : pixel_count * 4;
-
-    uint8_t* new_pixels =
-        (uint8_t*)IM_ALLOC(destination_byte_count);
-
-    if (!new_pixels)
-        return false;
-
-    if (internal_format == ImTextureFormat_Alpha8)
-    {
-        if (tex->Format == ImTextureFormat_Alpha8)
-        {
-            memcpy(
-                new_pixels,
-                source_pixels,
-                pixel_count);
-        }
-        else
-        {
-            /*
-             * Compress white-RGB RGBA32 into tightly packed Alpha8.
-             */
-            for (size_t index = 0;
-                index < pixel_count;
-                ++index)
-            {
-                new_pixels[index] =
-                    source_pixels[index * 4 + 3];
-            }
-        }
-    }
-    else
-    {
-        memcpy(
-            new_pixels,
-            source_pixels,
-            pixel_count * 4);
-    }
-
-    /*
-     * Allocate and populate the new buffer before releasing the old
-     * one, so a failed update leaves the previous texture intact.
-     */
     if (texture->OwnedPixels)
         IM_FREE(texture->OwnedPixels);
 
     texture->OwnedPixels = new_pixels;
-    texture->View.Pixels = new_pixels;
-    texture->View.Width = tex->Width;
-    texture->View.Height = tex->Height;
-    texture->View.ByteStride = internal_format == ImTextureFormat_Alpha8
-        ? (size_t)tex->Width
-        : (size_t)tex->Width * 4;
-    texture->View.Format = internal_format == ImTextureFormat_Alpha8
-        ? NAIVE_SWR_TEXTURE_FORMAT_ALPHA8
-        : NAIVE_SWR_TEXTURE_FORMAT_RGBA32;
+    texture->View = new_view;
 
     return true;
 }
@@ -232,8 +106,7 @@ static void ImGui_ImplGDI_UpdateTexture(
             tex->TexID == ImTextureID_Invalid &&
             tex->BackendUserData == nullptr);
 
-        ImGui_ImplGDI_Texture* texture =
-            IM_NEW(ImGui_ImplGDI_Texture)();
+        ImGui_ImplGDI_Texture* texture = IM_NEW(ImGui_ImplGDI_Texture)();
 
         if (!texture)
         {
@@ -243,9 +116,7 @@ static void ImGui_ImplGDI_UpdateTexture(
             return;
         }
 
-        if (!ImGui_ImplGDI_UploadTexturePixels(
-            texture,
-            tex))
+        if (!ImGui_ImplGDI_UploadTexturePixels(texture, tex))
         {
             IM_DELETE(texture);
 
@@ -259,8 +130,7 @@ static void ImGui_ImplGDI_UpdateTexture(
         tex->SetTexID((ImTextureID)texture);
         tex->SetStatus(ImTextureStatus_OK);
     }
-    else if (
-        tex->Status == ImTextureStatus_WantUpdates)
+    else if (tex->Status == ImTextureStatus_WantUpdates)
     {
         ImGui_ImplGDI_Texture* texture =
             (ImGui_ImplGDI_Texture*)tex->GetTexID();
@@ -285,8 +155,7 @@ static void ImGui_ImplGDI_UpdateTexture(
 
         tex->SetStatus(ImTextureStatus_OK);
     }
-    else if (
-        tex->Status == ImTextureStatus_WantDestroy)
+    else if (tex->Status == ImTextureStatus_WantDestroy)
     {
         ImGui_ImplGDI_Texture* texture =
             (ImGui_ImplGDI_Texture*)tex->GetTexID();
@@ -368,10 +237,10 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
     void* output_dev_ctx_handle,
     ImVec4* clear_color)
 {
-    int fb_width = (int)(draw_data->DisplaySize.x * draw_data->FramebufferScale.x);
-    int fb_height = (int)(draw_data->DisplaySize.y * draw_data->FramebufferScale.y);
+    int fb_width = (int)draw_data->DisplaySize.x;
+    int fb_height = (int)draw_data->DisplaySize.y;
 
-    // Avoid rendering when minimized, scale coordinates for retina displays (screen coordinates != framebuffer coordinates)
+    // Avoid rendering when minimized
     if (fb_width == 0 || fb_height == 0)
         return;
 
@@ -391,11 +260,11 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
 
     // Setup desired GDI state
 
-    const size_t required_pixel_count =
-        (size_t)fb_width * (size_t)fb_height;
+    const size_t required_pixel_count = (size_t)fb_width * (size_t)fb_height;
 
-    if (!ImGui_ImplGDI_EnsureFramebufferCapacity(
-        backend_data,
+    if (!naive_swr_imgui_ensure_framebuffer_capacity(
+        &backend_data->FramebufferPixels,
+        &backend_data->FramebufferCapacity,
         required_pixel_count))
     {
         IM_ASSERT(false && "Failed to allocate framebuffer!");
@@ -421,11 +290,6 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
         naive_swr_clear_framebuffer(&framebuffer, swr_clear_color);
     }
 
-    // Will project scissor/clipping rectangles into framebuffer space
-
-    ImVec2 clip_off = draw_data->DisplayPos;         // (0,0) unless using multi-viewports
-    ImVec2 clip_scale = draw_data->FramebufferScale; // (1,1) unless using retina display which are often (2,2)
-
     // Render command lists
     for (const ImDrawList* draw_list : draw_data->CmdLists)
     {
@@ -439,27 +303,8 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
             }
             else
             {
-                // Project scissor/clipping rectangles into framebuffer space
-
-                ImVec2 clip_min((pcmd->ClipRect.x - clip_off.x) * clip_scale.x, (pcmd->ClipRect.y - clip_off.y) * clip_scale.y);
-                ImVec2 clip_max((pcmd->ClipRect.z - clip_off.x) * clip_scale.x, (pcmd->ClipRect.w - clip_off.y) * clip_scale.y);
-                if (clip_max.x <= clip_min.x || clip_max.y <= clip_min.y)
-                    continue;
-
-                // - Apply scissor/clipping rectangle
-                // - Bind texture, Draw
-
                 ImGui_ImplGDI_Texture* texture =
                     (ImGui_ImplGDI_Texture*)pcmd->GetTexID();
-
-                NAIVE_SWR_CLIP_RECT swr_clip_rect;
-                swr_clip_rect.Left = (int32_t)ceilf(pcmd->ClipRect.x - 0.5f);
-                swr_clip_rect.Top = (int32_t)ceilf(pcmd->ClipRect.y - 0.5f);
-                swr_clip_rect.Right = (int32_t)ceilf(pcmd->ClipRect.z - 0.5f);
-                swr_clip_rect.Bottom = (int32_t)ceilf(pcmd->ClipRect.w - 0.5f);
-
-                if (pcmd->ElemCount == 0)
-                    continue;
 
                 IM_ASSERT(
                     texture != nullptr &&
@@ -470,7 +315,6 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
 
                 naive_swr_imgui_render_draw_command(
                     &framebuffer,
-                    &swr_clip_rect,
                     &texture->View,
                     draw_list,
                     pcmd);
