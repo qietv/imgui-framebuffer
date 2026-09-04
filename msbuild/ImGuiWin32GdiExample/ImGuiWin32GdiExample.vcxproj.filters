@@ -29,6 +29,9 @@
     <ClCompile Include="..\..\backends\naive_swr.c">
       <Filter>backends</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\backends\naive_swr_imgui.cpp">
+      <Filter>backends</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="imgui">
@@ -67,6 +70,9 @@
       <Filter>backends</Filter>
     </ClInclude>
     <ClInclude Include="..\..\backends\naive_swr.h">
+      <Filter>backends</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\backends\naive_swr_imgui.h">
       <Filter>backends</Filter>
     </ClInclude>
   </ItemGroup>

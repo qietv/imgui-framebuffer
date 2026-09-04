@@ -37,6 +37,7 @@
   <ItemGroup>
     <ClCompile Include="..\..\backends\imgui_impl_gdi.cpp" />
     <ClCompile Include="..\..\backends\naive_swr.c" />
+    <ClCompile Include="..\..\backends\naive_swr_imgui.cpp" />
     <ClCompile Include="..\..\imgui\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="..\..\imgui\imgui.cpp" />
     <ClCompile Include="..\..\imgui\imgui_demo.cpp" />
@@ -59,6 +60,7 @@
   <ItemGroup>
     <ClInclude Include="..\..\backends\imgui_impl_gdi.h" />
     <ClInclude Include="..\..\backends\naive_swr.h" />
+    <ClInclude Include="..\..\backends\naive_swr_imgui.h" />
     <ClInclude Include="..\..\imgui\backends\imgui_impl_win32.h" />
     <ClInclude Include="..\..\imgui\imconfig.h" />
     <ClInclude Include="..\..\imgui\imgui.h" />

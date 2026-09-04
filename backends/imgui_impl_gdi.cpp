@@ -23,254 +23,8 @@
 
 #ifndef IMGUI_DISABLE
 
-#include "naive_swr.h"
-
-static inline NAIVE_SWR_COLOR ImGui_ImplGDI_ColorFromImGui(
-    ImU32 value)
-{
-    NAIVE_SWR_COLOR color;
-
-    color.Red = (uint8_t)((value >> IM_COL32_R_SHIFT) & 0xFFu);
-    color.Green = (uint8_t)((value >> IM_COL32_G_SHIFT) & 0xFFu);
-    color.Blue = (uint8_t)((value >> IM_COL32_B_SHIFT) & 0xFFu);
-    color.Alpha = (uint8_t)((value >> IM_COL32_A_SHIFT) & 0xFFu);
-
-    return color;
-}
-
-static inline bool ImGui_ImplGDI_IsWhiteTextureCoordinate(
-    const ImVec2& coordinate,
-    const ImVec2& white_texture_coordinate)
-{
-    return coordinate.x == white_texture_coordinate.x &&
-        coordinate.y == white_texture_coordinate.y;
-}
-
-static uint32_t ImGui_ImplGDI_MakeRenderCommand(
-    const ImDrawVert* vertex_buffer,
-    const ImDrawIdx* index_buffer,
-    uint32_t remaining_element_count,
-    NAIVE_SWR_TEXTURE_FORMAT texture_format,
-    int32_t texture_width,
-    int32_t texture_height,
-    PNAIVE_SWR_RENDER_COMMAND render_command)
-{
-    IM_ASSERT(remaining_element_count >= 3);
-
-    const ImVec2 white_texture_coordinate =
-        ImGui::GetIO().Fonts->TexUvWhitePixel;
-
-    /*
-     * First try the canonical ImGui rectangle index pattern:
-     *
-     * A, B, C, A, C, D
-     */
-    if (remaining_element_count >= 6 &&
-        index_buffer[0] == index_buffer[3] &&
-        index_buffer[2] == index_buffer[4])
-    {
-        const ImDrawVert& a = vertex_buffer[index_buffer[0]];
-        const ImDrawVert& b = vertex_buffer[index_buffer[1]];
-        const ImDrawVert& c = vertex_buffer[index_buffer[2]];
-        const ImDrawVert& d = vertex_buffer[index_buffer[5]];
-
-        const bool position_is_rectangle =
-            a.pos.y == b.pos.y &&
-            b.pos.x == c.pos.x &&
-            c.pos.y == d.pos.y &&
-            d.pos.x == a.pos.x;
-
-        const bool color_is_uniform =
-            a.col == b.col &&
-            a.col == c.col &&
-            a.col == d.col;
-
-        const bool texture_is_rectangle =
-            a.uv.y == b.uv.y &&
-            b.uv.x == c.uv.x &&
-            c.uv.y == d.uv.y &&
-            d.uv.x == a.uv.x;
-
-        const bool texture_is_white =
-            ImGui_ImplGDI_IsWhiteTextureCoordinate(
-                a.uv, white_texture_coordinate) &&
-            ImGui_ImplGDI_IsWhiteTextureCoordinate(
-                b.uv, white_texture_coordinate) &&
-            ImGui_ImplGDI_IsWhiteTextureCoordinate(
-                c.uv, white_texture_coordinate) &&
-            ImGui_ImplGDI_IsWhiteTextureCoordinate(
-                d.uv, white_texture_coordinate);
-
-        if (position_is_rectangle &&
-            color_is_uniform &&
-            (texture_is_white || texture_is_rectangle))
-        {
-            render_command->Command.Rectangle.Position.X = a.pos.x;
-            render_command->Command.Rectangle.Position.Y = a.pos.y;
-
-            render_command->Command.Rectangle.Size.Width =
-                c.pos.x - a.pos.x;
-
-            render_command->Command.Rectangle.Size.Height =
-                c.pos.y - a.pos.y;
-
-            render_command->Command.Rectangle.Color =
-                ImGui_ImplGDI_ColorFromImGui(a.col);
-
-            if (render_command->Command.Rectangle.Size.Width == 0.0f ||
-                render_command->Command.Rectangle.Size.Height == 0.0f ||
-                render_command->Command.Rectangle.Color.Alpha == 0)
-            {
-                render_command->Type = NAIVE_SWR_RENDER_TYPE_SKIPPED;
-
-                return 6;
-            }
-
-            if (texture_is_white)
-            {
-                render_command->Type = NAIVE_SWR_RENDER_TYPE_SOLID_RECTANGLE;
-
-                return 6;
-            }
-
-            const float width = (float)texture_width;
-            const float height = (float)texture_height;
-
-            render_command->Command.Rectangle.TexturePosition.X =
-                a.uv.x * width;
-
-            render_command->Command.Rectangle.TexturePosition.Y =
-                a.uv.y * height;
-
-            render_command->Command.Rectangle.TextureSize.Width =
-                (c.uv.x - a.uv.x) * width;
-
-            render_command->Command.Rectangle.TextureSize.Height =
-                (c.uv.y - a.uv.y) * height;
-
-            render_command->Type =
-                texture_format == NAIVE_SWR_TEXTURE_FORMAT_ALPHA8
-                ? NAIVE_SWR_RENDER_TYPE_ALPHA8_RECTANGLE
-                : NAIVE_SWR_RENDER_TYPE_RGBA32_RECTANGLE;
-
-            return 6;
-        }
-    }
-
-    /*
-     * Rectangle recognition failed, so process the first triangle.
-     */
-    const ImDrawVert* vertices[3] =
-    {
-        &vertex_buffer[index_buffer[0]],
-        &vertex_buffer[index_buffer[1]],
-        &vertex_buffer[index_buffer[2]]
-    };
-
-    for (uint32_t i = 0; i < 3; ++i)
-    {
-        render_command->Command.Triangle.Positions[i].X =
-            vertices[i]->pos.x;
-
-        render_command->Command.Triangle.Positions[i].Y =
-            vertices[i]->pos.y;
-
-        render_command->Command.Triangle.Colors[i] =
-            ImGui_ImplGDI_ColorFromImGui(vertices[i]->col);
-    }
-
-    const float area =
-        (vertices[1]->pos.x - vertices[0]->pos.x) *
-        (vertices[2]->pos.y - vertices[0]->pos.y) -
-        (vertices[1]->pos.y - vertices[0]->pos.y) *
-        (vertices[2]->pos.x - vertices[0]->pos.x);
-
-    const bool fully_transparent =
-        render_command->Command.Triangle.Colors[0].Alpha == 0 &&
-        render_command->Command.Triangle.Colors[1].Alpha == 0 &&
-        render_command->Command.Triangle.Colors[2].Alpha == 0;
-
-    if (area == 0.0f || fully_transparent)
-    {
-        render_command->Type = NAIVE_SWR_RENDER_TYPE_SKIPPED;
-        return 3;
-    }
-
-    const ImU32 color_difference =
-        (vertices[0]->col ^ vertices[1]->col) |
-        (vertices[0]->col ^ vertices[2]->col);
-
-    const bool texture_is_white =
-        ImGui_ImplGDI_IsWhiteTextureCoordinate(
-            vertices[0]->uv, white_texture_coordinate) &&
-        ImGui_ImplGDI_IsWhiteTextureCoordinate(
-            vertices[1]->uv, white_texture_coordinate) &&
-        ImGui_ImplGDI_IsWhiteTextureCoordinate(
-            vertices[2]->uv, white_texture_coordinate);
-
-    if (texture_is_white)
-    {
-        if (color_difference == 0)
-        {
-            render_command->Type =
-                render_command->Command.Triangle.Colors[0].Alpha == 255
-                ? NAIVE_SWR_RENDER_TYPE_SOLID_OPAQUE_TRIANGLE
-                : NAIVE_SWR_RENDER_TYPE_SOLID_TRANSLUCENT_TRIANGLE;
-
-            return 3;
-        }
-
-        const ImU32 alpha_mask =
-            (ImU32)0xFFu << IM_COL32_A_SHIFT;
-
-        if ((color_difference & ~alpha_mask) == 0)
-        {
-            render_command->Type =
-                NAIVE_SWR_RENDER_TYPE_SOLID_ALPHA_GRADIENT_TRIANGLE;
-
-            return 3;
-        }
-
-        render_command->Type = NAIVE_SWR_RENDER_TYPE_SOLID_TRIANGLE;
-
-        return 3;
-    }
-
-    for (uint32_t i = 0; i < 3; ++i)
-    {
-        render_command->Command.Triangle.TextureCoordinates[i].U =
-            vertices[i]->uv.x;
-
-        render_command->Command.Triangle.TextureCoordinates[i].V =
-            vertices[i]->uv.y;
-    }
-
-    if (texture_format == NAIVE_SWR_TEXTURE_FORMAT_ALPHA8)
-    {
-        if (color_difference == 0)
-        {
-            render_command->Type =
-                render_command->Command.Triangle.Colors[0].Alpha == 255
-                ? NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE
-                : NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE;
-        }
-        else
-        {
-            render_command->Type = NAIVE_SWR_RENDER_TYPE_ALPHA8_TRIANGLE;
-        }
-    }
-    else
-    {
-        render_command->Type = NAIVE_SWR_RENDER_TYPE_RGBA32_TRIANGLE;
-    }
-
-    return 3;
-}
-
-#endif // !IMGUI_DISABLE
-
-#ifndef IMGUI_DISABLE
 #include "imgui_impl_gdi.h"
+#include "naive_swr_imgui.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -695,10 +449,8 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
                 // - Apply scissor/clipping rectangle
                 // - Bind texture, Draw
 
-                const ImDrawVert* vtx_buffer = draw_list->VtxBuffer.Data + pcmd->VtxOffset;
-                const ImDrawIdx* idx_buffer = draw_list->IdxBuffer.Data + pcmd->IdxOffset;
-
-                ImGui_ImplGDI_Texture* texture = (ImGui_ImplGDI_Texture*)pcmd->GetTexID();
+                ImGui_ImplGDI_Texture* texture =
+                    (ImGui_ImplGDI_Texture*)pcmd->GetTexID();
 
                 NAIVE_SWR_CLIP_RECT swr_clip_rect;
                 swr_clip_rect.Left = (int32_t)ceilf(pcmd->ClipRect.x - 0.5f);
@@ -706,42 +458,22 @@ IMGUI_IMPL_API void ImGui_ImplGDI_RenderDrawData(
                 swr_clip_rect.Right = (int32_t)ceilf(pcmd->ClipRect.z - 0.5f);
                 swr_clip_rect.Bottom = (int32_t)ceilf(pcmd->ClipRect.w - 0.5f);
 
-                for (unsigned int elem_i = 0;
-                    elem_i < pcmd->ElemCount;)
-                {
-                    NAIVE_SWR_RENDER_COMMAND render_command;
+                if (pcmd->ElemCount == 0)
+                    continue;
 
-                    IM_ASSERT(
-                        texture != nullptr &&
-                        "Invalid GDI texture!");
+                IM_ASSERT(
+                    texture != nullptr &&
+                    "Invalid GDI texture!");
 
-                    if (!texture)
-                        break;
+                if (!texture)
+                    continue;
 
-                    const uint32_t remaining_element_count =
-                        (uint32_t)(pcmd->ElemCount - elem_i);
-
-                    const ImDrawIdx* current_index_buffer =
-                        idx_buffer + elem_i;
-
-                    const uint32_t consumed_element_count =
-                        ImGui_ImplGDI_MakeRenderCommand(
-                            vtx_buffer,
-                            current_index_buffer,
-                            remaining_element_count,
-                            texture->View.Format,
-                            texture->View.Width,
-                            texture->View.Height,
-                            &render_command);
-
-                    elem_i += consumed_element_count;
-
-                    naive_swr_render_command(
-                        &framebuffer,
-                        &swr_clip_rect,
-                        &texture->View,
-                        &render_command);
-                }
+                naive_swr_imgui_render_draw_command(
+                    &framebuffer,
+                    &swr_clip_rect,
+                    &texture->View,
+                    draw_list,
+                    pcmd);
             }
         }
     }
