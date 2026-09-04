@@ -2209,10 +2209,8 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
     const uint8_t* texture_bytes = texture ? texture->Pixels : nullptr;
 
-    if (RenderType ==
-        NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE ||
-        RenderType ==
-        NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE)
+    if (RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE ||
+        RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_TRANSLUCENT_TINT_TRIANGLE)
     {
         const int source_red = color_1.Red;
         const int source_green = color_1.Green;
@@ -2229,51 +2227,132 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
             IM_ASSERT(tint_alpha > 0 && tint_alpha < 255);
         }
 
+        const NAIVE_SWR_TEXTURE_COORDINATE& texture_coordinate_1 =
+            triangle.TextureCoordinates[0];
+
+        const NAIVE_SWR_TEXTURE_COORDINATE& texture_coordinate_2 =
+            triangle.TextureCoordinates[1];
+
+        const NAIVE_SWR_TEXTURE_COORDINATE& texture_coordinate_3 =
+            triangle.TextureCoordinates[2];
+
+        /*
+         * Initialize the UV plane using the same multiplication grouping
+         * as the previous barycentric interpolation at the first pixel.
+         */
+        float texture_u_row =
+            texture_coordinate_1.U *
+            (edge_1_row * inverse_area) +
+            texture_coordinate_2.U *
+            (edge_2_row * inverse_area) +
+            texture_coordinate_3.U *
+            (edge_3_row * inverse_area);
+
+        float texture_v_row =
+            texture_coordinate_1.V *
+            (edge_1_row * inverse_area) +
+            texture_coordinate_2.V *
+            (edge_2_row * inverse_area) +
+            texture_coordinate_3.V *
+            (edge_3_row * inverse_area);
+
+        const float texture_u_step_x =
+            texture_coordinate_1.U *
+            (edge_1_step_x * inverse_area) +
+            texture_coordinate_2.U *
+            (edge_2_step_x * inverse_area) +
+            texture_coordinate_3.U *
+            (edge_3_step_x * inverse_area);
+
+        const float texture_v_step_x =
+            texture_coordinate_1.V *
+            (edge_1_step_x * inverse_area) +
+            texture_coordinate_2.V *
+            (edge_2_step_x * inverse_area) +
+            texture_coordinate_3.V *
+            (edge_3_step_x * inverse_area);
+
+        const float texture_u_step_y =
+            texture_coordinate_1.U *
+            (edge_1_step_y * inverse_area) +
+            texture_coordinate_2.U *
+            (edge_2_step_y * inverse_area) +
+            texture_coordinate_3.U *
+            (edge_3_step_y * inverse_area);
+
+        const float texture_v_step_y =
+            texture_coordinate_1.V *
+            (edge_1_step_y * inverse_area) +
+            texture_coordinate_2.V *
+            (edge_2_step_y * inverse_area) +
+            texture_coordinate_3.V *
+            (edge_3_step_y * inverse_area);
+
+        ImU32* destination_row =
+            pixel_buffer +
+            (size_t)y0 * framebuffer_width +
+            x0;
+
+        const int maximum_span_width =
+            x1 - x0;
+
         for (int y = y0; y < y1; ++y)
         {
-            float edge_1 = edge_1_row;
-            float edge_2 = edge_2_row;
-            float edge_3 = edge_3_row;
+            int span_begin = 0;
+            int span_end = maximum_span_width;
 
-            for (int x = x0; x < x1; ++x)
+            const bool has_coverage =
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_1_row,
+                    edge_1_step_x,
+                    top_left_1,
+                    span_begin,
+                    span_end) &&
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_2_row,
+                    edge_2_step_x,
+                    top_left_2,
+                    span_begin,
+                    span_end) &&
+                ImGui_ImplGDI_ConstrainCoverageSpan(
+                    edge_3_row,
+                    edge_3_step_x,
+                    top_left_3,
+                    span_begin,
+                    span_end);
+
+            if (has_coverage)
             {
-                const bool inside =
-                    edge_1 >= 0.0f &&
-                    edge_2 >= 0.0f &&
-                    edge_3 >= 0.0f &&
-                    (edge_1 != 0.0f || top_left_1) &&
-                    (edge_2 != 0.0f || top_left_2) &&
-                    (edge_3 != 0.0f || top_left_3);
+                float texture_u = texture_u_row;
+                float texture_v = texture_v_row;
 
-                if (inside)
+                /*
+                 * Preserve affine-plane repeated addition up to the first
+                 * pixel in the span.
+                 */
+                for (int offset = 0;
+                    offset < span_begin;
+                    ++offset)
                 {
+                    texture_u += texture_u_step_x;
+                    texture_v += texture_v_step_x;
+                }
+
+                const int span_width =
+                    span_end - span_begin;
+
+                ImU32* destination =
+                    destination_row + span_begin;
+
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
-                    ++covered_pixel_count;
+                covered_pixel_count +=
+                    (uint64_t)span_width;
 #endif
 
-                    const float weight_1 =
-                        edge_1 * inverse_area;
-
-                    const float weight_2 =
-                        edge_2 * inverse_area;
-
-                    const float weight_3 =
-                        edge_3 * inverse_area;
-
-                    /*
-                     * Keep the existing UV interpolation and sampling
-                     * order unchanged for this experiment.
-                     */
-                    const float texture_u =
-                        triangle.TextureCoordinates[0].U * weight_1 +
-                        triangle.TextureCoordinates[1].U * weight_2 +
-                        triangle.TextureCoordinates[2].U * weight_3;
-
-                    const float texture_v =
-                        triangle.TextureCoordinates[0].V * weight_1 +
-                        triangle.TextureCoordinates[1].V * weight_2 +
-                        triangle.TextureCoordinates[2].V * weight_3;
-
+                for (int offset = 0;
+                    offset < span_width;
+                    ++offset)
+                {
                     int texture_x =
                         (int)(texture_u * texture->Width);
 
@@ -2297,10 +2376,6 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                     const int texture_alpha =
                         texture_bytes[texture_index];
 
-                    /*
-                     * RenderType is a compile-time template argument.
-                     * MSVC should eliminate the unused side completely.
-                     */
                     const int source_alpha =
                         RenderType ==
                         NAIVE_SWR_RENDER_TYPE_ALPHA8_OPAQUE_TINT_TRIANGLE
@@ -2309,27 +2384,28 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                             texture_alpha,
                             tint_alpha);
 
-                    ImU32* destination =
-                        pixel_buffer +
-                        (size_t)y * framebuffer_width +
-                        x;
-
                     ImGui_ImplGDI_BlendOver(
                         destination,
                         source_red,
                         source_green,
                         source_blue,
                         source_alpha);
-                }
 
-                edge_1 += edge_1_step_x;
-                edge_2 += edge_2_step_x;
-                edge_3 += edge_3_step_x;
+                    ++destination;
+
+                    texture_u += texture_u_step_x;
+                    texture_v += texture_v_step_x;
+                }
             }
+
+            destination_row += framebuffer_width;
 
             edge_1_row += edge_1_step_y;
             edge_2_row += edge_2_step_y;
             edge_3_row += edge_3_step_y;
+
+            texture_u_row += texture_u_step_y;
+            texture_v_row += texture_v_step_y;
         }
 
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
