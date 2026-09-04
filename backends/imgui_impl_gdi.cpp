@@ -702,6 +702,68 @@ static inline void ImGui_ImplGDI_BlendOver(
         (output_blue << 0);
 }
 
+struct ImGui_ImplGDI_ConstantBlendState
+{
+    ImU32 SourceRedAlpha;
+    ImU32 SourceGreenAlpha;
+    ImU32 SourceBlueAlpha;
+    ImU32 InverseAlpha;
+};
+
+static inline void ImGui_ImplGDI_BlendConstantSpan(
+    ImU32* destination,
+    size_t pixel_count,
+    const ImGui_ImplGDI_ConstantBlendState& blend_state)
+{
+    const ImU32 source_red_alpha =
+        blend_state.SourceRedAlpha;
+
+    const ImU32 source_green_alpha =
+        blend_state.SourceGreenAlpha;
+
+    const ImU32 source_blue_alpha =
+        blend_state.SourceBlueAlpha;
+
+    const ImU32 inverse_alpha =
+        blend_state.InverseAlpha;
+
+    for (size_t index = 0; index < pixel_count; ++index)
+    {
+        const ImU32 destination_color =
+            destination[index];
+
+        const ImU32 destination_blue =
+            (destination_color >> 0) & 0xFFu;
+
+        const ImU32 destination_green =
+            (destination_color >> 8) & 0xFFu;
+
+        const ImU32 destination_red =
+            (destination_color >> 16) & 0xFFu;
+
+        const ImU32 output_red =
+            ImGui_ImplGDI_Div255Rounded(
+                source_red_alpha +
+                destination_red * inverse_alpha);
+
+        const ImU32 output_green =
+            ImGui_ImplGDI_Div255Rounded(
+                source_green_alpha +
+                destination_green * inverse_alpha);
+
+        const ImU32 output_blue =
+            ImGui_ImplGDI_Div255Rounded(
+                source_blue_alpha +
+                destination_blue * inverse_alpha);
+
+        destination[index] =
+            0xFF000000u |
+            (output_red << 16) |
+            (output_green << 8) |
+            output_blue;
+    }
+}
+
 static bool ImGui_ImplGDI_ClipPixelBounds(
     int& x0,
     int& y0,
@@ -829,53 +891,19 @@ static void ImGui_ImplGDI_RenderSolidRectangleCommand(
     }
 
     const ImU32 source_alpha = color.Alpha;
-    const ImU32 inverse_alpha = 255u - source_alpha;
 
-    const ImU32 source_red_alpha =
-        (ImU32)color.Red * source_alpha;
-
-    const ImU32 source_green_alpha =
-        (ImU32)color.Green * source_alpha;
-
-    const ImU32 source_blue_alpha =
-        (ImU32)color.Blue * source_alpha;
+    ImGui_ImplGDI_ConstantBlendState blend_state;
+    blend_state.SourceRedAlpha = (ImU32)color.Red * source_alpha;
+    blend_state.SourceGreenAlpha = (ImU32)color.Green * source_alpha;
+    blend_state.SourceBlueAlpha = (ImU32)color.Blue * source_alpha;
+    blend_state.InverseAlpha = 255u - source_alpha;
 
     for (int y = y0; y < y1; ++y)
     {
-        for (int x = 0; x < span_width; ++x)
-        {
-            const ImU32 destination_color = destination_row[x];
-
-            const ImU32 destination_blue =
-                (destination_color >> 0) & 0xFFu;
-
-            const ImU32 destination_green =
-                (destination_color >> 8) & 0xFFu;
-
-            const ImU32 destination_red =
-                (destination_color >> 16) & 0xFFu;
-
-            const ImU32 output_red =
-                ImGui_ImplGDI_Div255Rounded(
-                    source_red_alpha +
-                    destination_red * inverse_alpha);
-
-            const ImU32 output_green =
-                ImGui_ImplGDI_Div255Rounded(
-                    source_green_alpha +
-                    destination_green * inverse_alpha);
-
-            const ImU32 output_blue =
-                ImGui_ImplGDI_Div255Rounded(
-                    source_blue_alpha +
-                    destination_blue * inverse_alpha);
-
-            destination_row[x] =
-                0xFF000000u |
-                (output_red << 16) |
-                (output_green << 8) |
-                output_blue;
-        }
+        ImGui_ImplGDI_BlendConstantSpan(
+            destination_row,
+            (size_t)span_width,
+            blend_state);
 
         destination_row += framebuffer_width;
     }
