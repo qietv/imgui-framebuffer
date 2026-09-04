@@ -306,6 +306,12 @@ struct ImGui_ImplGDI_Stats
 
     ImGui_ImplGDI_RectanglePathStats OpaqueRectangles;
     ImGui_ImplGDI_RectanglePathStats TranslucentRectangles;
+
+    ImGui_ImplGDI_RectanglePathStats A8Rectangles;
+    ImGui_ImplGDI_RectanglePathStats A8RectanglesExactUnitX;
+    ImGui_ImplGDI_RectanglePathStats A8RectanglesContiguousX;
+    ImGui_ImplGDI_RectanglePathStats A8RectanglesContiguousXY;
+    ImGui_ImplGDI_RectanglePathStats A8RectanglesContiguousXOpaqueTint;
 };
 
 static ImGui_ImplGDI_Stats g_ImGui_ImplGDI_Stats = {};
@@ -339,6 +345,18 @@ static void ImGui_ImplGDI_StatsDebugPrint(
     va_end(arguments);
 
     ::OutputDebugStringA(buffer);
+}
+
+static void ImGui_ImplGDI_PrintRectanglePathStats(
+    const char* name,
+    const ImGui_ImplGDI_RectanglePathStats& statistics,
+    double frame_count)
+{
+    ImGui_ImplGDI_StatsDebugPrint(
+        "%-44s cmd/frame=%8.2f  pixels/frame=%10.0f\n",
+        name,
+        (double)statistics.CommandCount / frame_count,
+        (double)statistics.PixelCount / frame_count);
 }
 
 static ImGui_ImplGDI_TriangleStatsClass
@@ -440,6 +458,32 @@ static void ImGui_ImplGDI_EndStatisticsFrame()
         .TranslucentRectangles.CommandCount / frame_count,
         (double)g_ImGui_ImplGDI_Stats
         .TranslucentRectangles.PixelCount / frame_count);
+
+    ImGui_ImplGDI_PrintRectanglePathStats(
+        "A8 rectangles total",
+        g_ImGui_ImplGDI_Stats.A8Rectangles,
+        frame_count);
+
+    ImGui_ImplGDI_PrintRectanglePathStats(
+        "A8 rectangles exact step X = +1",
+        g_ImGui_ImplGDI_Stats.A8RectanglesExactUnitX,
+        frame_count);
+
+    ImGui_ImplGDI_PrintRectanglePathStats(
+        "A8 rectangles sampled contiguous X",
+        g_ImGui_ImplGDI_Stats.A8RectanglesContiguousX,
+        frame_count);
+
+    ImGui_ImplGDI_PrintRectanglePathStats(
+        "A8 rectangles sampled contiguous X/Y",
+        g_ImGui_ImplGDI_Stats.A8RectanglesContiguousXY,
+        frame_count);
+
+    ImGui_ImplGDI_PrintRectanglePathStats(
+        "A8 contiguous X with tint alpha 255",
+        g_ImGui_ImplGDI_Stats
+        .A8RectanglesContiguousXOpaqueTint,
+        frame_count);
 
     memset(
         &g_ImGui_ImplGDI_Stats,
@@ -929,6 +973,64 @@ static inline void ImGui_ImplGDI_BlendConstantSpan(
     }
 }
 
+static inline void ImGui_ImplGDI_BlendA8OpaqueTintSpan(
+    ImU32* destination,
+    const uint8_t* source_alpha,
+    size_t pixel_count,
+    ImU32 source_red,
+    ImU32 source_green,
+    ImU32 source_blue)
+{
+    for (size_t index = 0;
+        index < pixel_count;
+        ++index)
+    {
+        /*
+         * The vertex tint alpha is known to be 255, therefore:
+         *
+         * Mul255(texture_alpha, 255) == texture_alpha
+         */
+        const ImU32 alpha =
+            source_alpha[index];
+
+        const ImU32 inverse_alpha =
+            255u - alpha;
+
+        const ImU32 destination_color =
+            destination[index];
+
+        const ImU32 destination_blue =
+            (destination_color >> 0) & 0xFFu;
+
+        const ImU32 destination_green =
+            (destination_color >> 8) & 0xFFu;
+
+        const ImU32 destination_red =
+            (destination_color >> 16) & 0xFFu;
+
+        const ImU32 output_red =
+            ImGui_ImplGDI_Div255Rounded(
+                source_red * alpha +
+                destination_red * inverse_alpha);
+
+        const ImU32 output_green =
+            ImGui_ImplGDI_Div255Rounded(
+                source_green * alpha +
+                destination_green * inverse_alpha);
+
+        const ImU32 output_blue =
+            ImGui_ImplGDI_Div255Rounded(
+                source_blue * alpha +
+                destination_blue * inverse_alpha);
+
+        destination[index] =
+            0xFF000000u |
+            (output_red << 16) |
+            (output_green << 8) |
+            output_blue;
+    }
+}
+
 static bool ImGui_ImplGDI_ClipPixelBounds(
     int& x0,
     int& y0,
@@ -1161,12 +1263,225 @@ static void ImGui_ImplGDI_RenderTexturedRectangleCommand(
         (((float)x0 + 0.5f) - rectangle.Position.X) *
         texture_step_x;
 
-    float texture_y =
+    const float texture_y_start =
         rectangle.TexturePosition.Y +
         (((float)y0 + 0.5f) - rectangle.Position.Y) *
         texture_step_y;
 
+    float texture_y = texture_y_start;
+
+#if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
+    if (RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_RECTANGLE)
+    {
+        const int destination_width = x1 - x0;
+        const int destination_height = y1 - y0;
+
+        const uint64_t destination_pixel_count =
+            (uint64_t)destination_width *
+            (uint64_t)destination_height;
+
+        ImGui_ImplGDI_RectanglePathStats& total_statistics =
+            g_ImGui_ImplGDI_Stats.A8Rectangles;
+
+        ++total_statistics.CommandCount;
+        total_statistics.PixelCount +=
+            destination_pixel_count;
+
+        if (texture_step_x == 1.0f)
+        {
+            ImGui_ImplGDI_RectanglePathStats& statistics =
+                g_ImGui_ImplGDI_Stats
+                .A8RectanglesExactUnitX;
+
+            ++statistics.CommandCount;
+            statistics.PixelCount +=
+                destination_pixel_count;
+        }
+
+        /*
+         * Simulate the current nearest-neighbor X sampling exactly.
+         * A sequence is contiguous if its clamped source indexes are:
+         *
+         * first, first + 1, first + 2, ...
+         */
+        bool texture_x_is_contiguous = true;
+        int first_texture_x = 0;
+        float test_texture_x = texture_x_start;
+
+        for (int offset = 0;
+            offset < destination_width;
+            ++offset)
+        {
+            int sampled_texture_x =
+                (int)test_texture_x;
+
+            sampled_texture_x = IMGUI_IMPL_GDI_CLAMP(
+                sampled_texture_x,
+                0,
+                texture->Width - 1);
+
+            if (offset == 0)
+            {
+                first_texture_x =
+                    sampled_texture_x;
+            }
+            else if (
+                sampled_texture_x !=
+                first_texture_x + offset)
+            {
+                texture_x_is_contiguous = false;
+                break;
+            }
+
+            test_texture_x += texture_step_x;
+        }
+
+        /*
+         * Perform the corresponding Y test. Y continuity is not
+         * required for a per-row span, but is useful for identifying
+         * true 1:1 glyph rectangles.
+         */
+        bool texture_y_is_contiguous = true;
+        int first_texture_y = 0;
+        float test_texture_y = texture_y_start;
+
+        for (int offset = 0;
+            offset < destination_height;
+            ++offset)
+        {
+            int sampled_texture_y =
+                (int)test_texture_y;
+
+            sampled_texture_y = IMGUI_IMPL_GDI_CLAMP(
+                sampled_texture_y,
+                0,
+                texture->Height - 1);
+
+            if (offset == 0)
+            {
+                first_texture_y =
+                    sampled_texture_y;
+            }
+            else if (
+                sampled_texture_y !=
+                first_texture_y + offset)
+            {
+                texture_y_is_contiguous = false;
+                break;
+            }
+
+            test_texture_y += texture_step_y;
+        }
+
+        if (texture_x_is_contiguous)
+        {
+            ImGui_ImplGDI_RectanglePathStats& statistics =
+                g_ImGui_ImplGDI_Stats
+                .A8RectanglesContiguousX;
+
+            ++statistics.CommandCount;
+            statistics.PixelCount +=
+                destination_pixel_count;
+
+            if (color.Alpha == 255)
+            {
+                ImGui_ImplGDI_RectanglePathStats&
+                    opaque_tint_statistics =
+                    g_ImGui_ImplGDI_Stats
+                    .A8RectanglesContiguousXOpaqueTint;
+
+                ++opaque_tint_statistics.CommandCount;
+                opaque_tint_statistics.PixelCount +=
+                    destination_pixel_count;
+            }
+
+            if (texture_y_is_contiguous)
+            {
+                ImGui_ImplGDI_RectanglePathStats&
+                    xy_statistics =
+                    g_ImGui_ImplGDI_Stats
+                    .A8RectanglesContiguousXY;
+
+                ++xy_statistics.CommandCount;
+                xy_statistics.PixelCount +=
+                    destination_pixel_count;
+            }
+        }
+    }
+#endif
+
     const uint8_t* texture_bytes = texture->Pixels;
+
+    if (RenderType == NAIVE_SWR_RENDER_TYPE_ALPHA8_RECTANGLE &&
+        color.Alpha == 255 &&
+        texture_step_x == 1.0f &&
+        texture_step_y == 1.0f)
+    {
+        const int destination_width =
+            x1 - x0;
+
+        const int destination_height =
+            y1 - y0;
+
+        const int source_x0 =
+            (int)texture_x_start;
+
+        const int source_y0 =
+            (int)texture_y_start;
+
+        const float source_x_last =
+            texture_x_start +
+            (float)(destination_width - 1);
+
+        const float source_y_last =
+            texture_y_start +
+            (float)(destination_height - 1);
+
+        /*
+         * Verify once per rectangle that no per-pixel texture clamp
+         * would have taken effect.
+         */
+        if (texture_x_start >= 0.0f &&
+            texture_y_start >= 0.0f &&
+            source_x_last < (float)texture->Width &&
+            source_y_last < (float)texture->Height &&
+            source_x0 >= 0 &&
+            source_y0 >= 0 &&
+            source_x0 + destination_width <= texture->Width &&
+            source_y0 + destination_height <= texture->Height)
+        {
+            ImU32* destination_row =
+                pixel_buffer +
+                (size_t)y0 * framebuffer_width +
+                x0;
+
+            const uint8_t* source_row =
+                texture_bytes +
+                (size_t)source_y0 * texture->Width +
+                source_x0;
+
+            for (int row = 0;
+                row < destination_height;
+                ++row)
+            {
+                ImGui_ImplGDI_BlendA8OpaqueTintSpan(
+                    destination_row,
+                    source_row,
+                    (size_t)destination_width,
+                    color.Red,
+                    color.Green,
+                    color.Blue);
+
+                destination_row +=
+                    framebuffer_width;
+
+                source_row +=
+                    texture->Width;
+            }
+
+            return;
+        }
+    }
 
     for (int y = y0; y < y1; ++y)
     {
