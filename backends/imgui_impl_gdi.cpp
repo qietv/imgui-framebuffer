@@ -281,6 +281,21 @@ uint32_t naive_swr_make_render_command(
 #pragma clang diagnostic ignored "-Wold-style-cast"         // warning: use of old-style cast                            // yes, they are more terse.
 #endif
 
+#define IMGUI_IMPL_GDI_ENABLE_SSE2_CONSTANT_BLEND
+
+#if !defined(_DEBUG)
+#define IMGUI_IMPL_GDI_ENABLE_SSE2_A8_OPAQUE_TINT_BLEND
+#endif
+
+#if (defined(IMGUI_IMPL_GDI_ENABLE_SSE2_CONSTANT_BLEND) || \
+    defined(IMGUI_IMPL_GDI_ENABLE_SSE2_A8_OPAQUE_TINT_BLEND)) && \
+    (defined(_M_X64) || \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || \
+    defined(__SSE2__))
+#include <emmintrin.h>
+#define IMGUI_IMPL_GDI_HAS_SSE2
+#endif
+
 // Temporary diagnostic switch. Must be off for formal performance testing.
 //#define IMGUI_IMPL_GDI_ENABLE_STATS
 
@@ -983,7 +998,129 @@ static inline void ImGui_ImplGDI_BlendConstantSpan(
     const ImU32 inverse_alpha =
         blend_state.InverseAlpha;
 
-    for (size_t index = 0; index < pixel_count; ++index)
+#if defined(IMGUI_IMPL_GDI_HAS_SSE2) && \
+    defined(IMGUI_IMPL_GDI_ENABLE_SSE2_CONSTANT_BLEND)
+    const __m128i zero =
+        _mm_setzero_si128();
+
+    const __m128i inverse_alpha_16 =
+        _mm_set1_epi16((short)inverse_alpha);
+
+    const __m128i rounding_16 =
+        _mm_set1_epi16(128);
+
+    /*
+     * Unpacked destination byte order:
+     *
+     * B0 G0 R0 A0 B1 G1 R1 A1
+     */
+    const __m128i source_terms_16 =
+        _mm_set_epi16(
+            0,
+            (short)source_red_alpha,
+            (short)source_green_alpha,
+            (short)source_blue_alpha,
+            0,
+            (short)source_red_alpha,
+            (short)source_green_alpha,
+            (short)source_blue_alpha);
+
+    const __m128i framebuffer_alpha_mask =
+        _mm_set1_epi32((int)0xFF000000u);
+
+    while (pixel_count >= 4)
+    {
+        const __m128i packed_destination =
+            _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(
+                    destination));
+
+        __m128i low =
+            _mm_unpacklo_epi8(
+                packed_destination,
+                zero);
+
+        __m128i high =
+            _mm_unpackhi_epi8(
+                packed_destination,
+                zero);
+
+        low = _mm_mullo_epi16(
+            low,
+            inverse_alpha_16);
+
+        high = _mm_mullo_epi16(
+            high,
+            inverse_alpha_16);
+
+        low = _mm_add_epi16(
+            low,
+            source_terms_16);
+
+        high = _mm_add_epi16(
+            high,
+            source_terms_16);
+
+        /*
+         * Exact rounded division by 255 for values in [0, 65025]:
+         *
+         * value = value + 128;
+         * value = value + (value >> 8);
+         * result = value >> 8;
+         */
+        low = _mm_add_epi16(
+            low,
+            rounding_16);
+
+        high = _mm_add_epi16(
+            high,
+            rounding_16);
+
+        low = _mm_add_epi16(
+            low,
+            _mm_srli_epi16(low, 8));
+
+        high = _mm_add_epi16(
+            high,
+            _mm_srli_epi16(high, 8));
+
+        low = _mm_srli_epi16(
+            low,
+            8);
+
+        high = _mm_srli_epi16(
+            high,
+            8);
+
+        __m128i packed_result =
+            _mm_packus_epi16(
+                low,
+                high);
+
+        /*
+         * Keep the framebuffer alpha invariant even if an uncleared
+         * destination initially contains an arbitrary alpha byte.
+         */
+        packed_result = _mm_or_si128(
+            packed_result,
+            framebuffer_alpha_mask);
+
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(
+                destination),
+            packed_result);
+
+        destination += 4;
+        pixel_count -= 4;
+    }
+#endif
+
+    /*
+     * Canonical scalar fallback and SIMD tail.
+     */
+    for (size_t index = 0;
+        index < pixel_count;
+        ++index)
     {
         const ImU32 destination_color =
             destination[index];
@@ -1028,15 +1165,215 @@ static inline void ImGui_ImplGDI_BlendA8OpaqueTintSpan(
     ImU32 source_green,
     ImU32 source_blue)
 {
+#if defined(IMGUI_IMPL_GDI_HAS_SSE2) && \
+    defined(IMGUI_IMPL_GDI_ENABLE_SSE2_A8_OPAQUE_TINT_BLEND)
+
+    /*
+     * In unoptimized builds, keep all SIMD state construction out
+     * of spans that are too short to enter the SIMD loop.
+     */
+    if (pixel_count >= 4)
+    {
+        const __m128i zero =
+            _mm_setzero_si128();
+
+        const __m128i all_255_16 =
+            _mm_set1_epi16(255);
+
+        const __m128i rounding_16 =
+            _mm_set1_epi16(128);
+
+        /*
+         * Unpacked channel order:
+         *
+         * B0 G0 R0 A0 B1 G1 R1 A1
+         */
+        const __m128i source_color_16 =
+            _mm_set_epi16(
+                0,
+                (short)source_red,
+                (short)source_green,
+                (short)source_blue,
+                0,
+                (short)source_red,
+                (short)source_green,
+                (short)source_blue);
+
+        const __m128i framebuffer_alpha_mask =
+            _mm_set1_epi32((int)0xFF000000u);
+
+        while (pixel_count >= 4)
+        {
+            /*
+             * Load exactly four Alpha8 texels without assuming
+             * alignment or reading past the span.
+             */
+            ImU32 packed_source_alpha;
+
+            memcpy(
+                &packed_source_alpha,
+                source_alpha,
+                sizeof(packed_source_alpha));
+
+            const __m128i alpha_bytes =
+                _mm_cvtsi32_si128(
+                    (int)packed_source_alpha);
+
+            /*
+             * Convert:
+             *
+             * a0 a1 a2 a3
+             *
+             * into:
+             *
+             * a0 a0 a0 a0 a1 a1 a1 a1
+             * a2 a2 a2 a2 a3 a3 a3 a3
+             */
+            const __m128i alpha_16 =
+                _mm_unpacklo_epi8(
+                    alpha_bytes,
+                    zero);
+
+            const __m128i alpha_pairs_16 =
+                _mm_unpacklo_epi16(
+                    alpha_16,
+                    alpha_16);
+
+            const __m128i alpha_low_16 =
+                _mm_unpacklo_epi32(
+                    alpha_pairs_16,
+                    alpha_pairs_16);
+
+            const __m128i alpha_high_16 =
+                _mm_unpackhi_epi32(
+                    alpha_pairs_16,
+                    alpha_pairs_16);
+
+            const __m128i inverse_alpha_low_16 =
+                _mm_sub_epi16(
+                    all_255_16,
+                    alpha_low_16);
+
+            const __m128i inverse_alpha_high_16 =
+                _mm_sub_epi16(
+                    all_255_16,
+                    alpha_high_16);
+
+            const __m128i packed_destination =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        destination));
+
+            __m128i destination_low_16 =
+                _mm_unpacklo_epi8(
+                    packed_destination,
+                    zero);
+
+            __m128i destination_high_16 =
+                _mm_unpackhi_epi8(
+                    packed_destination,
+                    zero);
+
+            const __m128i source_low_16 =
+                _mm_mullo_epi16(
+                    source_color_16,
+                    alpha_low_16);
+
+            const __m128i source_high_16 =
+                _mm_mullo_epi16(
+                    source_color_16,
+                    alpha_high_16);
+
+            destination_low_16 =
+                _mm_mullo_epi16(
+                    destination_low_16,
+                    inverse_alpha_low_16);
+
+            destination_high_16 =
+                _mm_mullo_epi16(
+                    destination_high_16,
+                    inverse_alpha_high_16);
+
+            destination_low_16 =
+                _mm_add_epi16(
+                    destination_low_16,
+                    source_low_16);
+
+            destination_high_16 =
+                _mm_add_epi16(
+                    destination_high_16,
+                    source_high_16);
+
+            /*
+             * Exact rounded division by 255:
+             *
+             * value = value + 128;
+             * value = value + (value >> 8);
+             * result = value >> 8;
+             */
+            destination_low_16 =
+                _mm_add_epi16(
+                    destination_low_16,
+                    rounding_16);
+
+            destination_high_16 =
+                _mm_add_epi16(
+                    destination_high_16,
+                    rounding_16);
+
+            destination_low_16 =
+                _mm_add_epi16(
+                    destination_low_16,
+                    _mm_srli_epi16(
+                        destination_low_16,
+                        8));
+
+            destination_high_16 =
+                _mm_add_epi16(
+                    destination_high_16,
+                    _mm_srli_epi16(
+                        destination_high_16,
+                        8));
+
+            destination_low_16 =
+                _mm_srli_epi16(
+                    destination_low_16,
+                    8);
+
+            destination_high_16 =
+                _mm_srli_epi16(
+                    destination_high_16,
+                    8);
+
+            __m128i packed_result =
+                _mm_packus_epi16(
+                    destination_low_16,
+                    destination_high_16);
+
+            packed_result =
+                _mm_or_si128(
+                    packed_result,
+                    framebuffer_alpha_mask);
+
+            _mm_storeu_si128(
+                reinterpret_cast<__m128i*>(
+                    destination),
+                packed_result);
+
+            destination += 4;
+            source_alpha += 4;
+            pixel_count -= 4;
+        }
+    }
+#endif
+
+    /*
+     * Canonical scalar fallback and SIMD tail.
+     */
     for (size_t index = 0;
         index < pixel_count;
         ++index)
     {
-        /*
-         * The vertex tint alpha is known to be 255, therefore:
-         *
-         * Mul255(texture_alpha, 255) == texture_alpha
-         */
         const ImU32 alpha =
             source_alpha[index];
 
