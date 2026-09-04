@@ -2483,21 +2483,13 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
             if (has_coverage)
             {
-                /*
-                 * Advance alpha exactly as the current affine loop would
-                 * have done for the pixels preceding this span.
-                 */
-                float interpolated_alpha = alpha_row;
+                const float interpolated_alpha_at_span_begin =
+                    alpha_row +
+                    alpha_step_x * (float)span_begin;
 
-                for (int offset = 0;
-                    offset < span_begin;
-                    ++offset)
-                {
-                    interpolated_alpha += alpha_step_x;
-                }
+                float interpolated_alpha = interpolated_alpha_at_span_begin;
 
-                const int span_width =
-                    span_end - span_begin;
+                const int span_width = span_end - span_begin;
 
                 ImU32* destination = destination_row + span_begin;
 
@@ -2573,57 +2565,62 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
         const NAIVE_SWR_TEXTURE_COORDINATE& texture_coordinate_3 =
             triangle.TextureCoordinates[2];
 
+        const float texture_width = (float)texture->Width;
+        const float texture_height = (float)texture->Height;
+
         /*
-         * Initialize the UV plane using the same multiplication grouping
-         * as the previous barycentric interpolation at the first pixel.
+         * Build the affine planes directly in texel space, moving the
+         * normalized-UV-to-texel multiplication out of the pixel loop.
          */
-        float texture_u_row =
-            texture_coordinate_1.U *
-            (edge_1_row * inverse_area) +
-            texture_coordinate_2.U *
-            (edge_2_row * inverse_area) +
-            texture_coordinate_3.U *
-            (edge_3_row * inverse_area);
 
-        float texture_v_row =
-            texture_coordinate_1.V *
-            (edge_1_row * inverse_area) +
-            texture_coordinate_2.V *
-            (edge_2_row * inverse_area) +
-            texture_coordinate_3.V *
-            (edge_3_row * inverse_area);
-
-        const float texture_u_step_x =
-            texture_coordinate_1.U *
-            (edge_1_step_x * inverse_area) +
-            texture_coordinate_2.U *
-            (edge_2_step_x * inverse_area) +
-            texture_coordinate_3.U *
-            (edge_3_step_x * inverse_area);
-
-        const float texture_v_step_x =
-            texture_coordinate_1.V *
-            (edge_1_step_x * inverse_area) +
-            texture_coordinate_2.V *
-            (edge_2_step_x * inverse_area) +
-            texture_coordinate_3.V *
-            (edge_3_step_x * inverse_area);
-
-        const float texture_u_step_y =
-            texture_coordinate_1.U *
-            (edge_1_step_y * inverse_area) +
-            texture_coordinate_2.U *
-            (edge_2_step_y * inverse_area) +
-            texture_coordinate_3.U *
-            (edge_3_step_y * inverse_area);
-
-        const float texture_v_step_y =
-            texture_coordinate_1.V *
-            (edge_1_step_y * inverse_area) +
-            texture_coordinate_2.V *
-            (edge_2_step_y * inverse_area) +
-            texture_coordinate_3.V *
-            (edge_3_step_y * inverse_area);
+        float texture_x_row =
+            (texture_coordinate_1.U *
+                (edge_1_row * inverse_area) +
+                texture_coordinate_2.U *
+                (edge_2_row * inverse_area) +
+                texture_coordinate_3.U *
+                (edge_3_row * inverse_area)) *
+            texture_width;
+        float texture_y_row =
+            (texture_coordinate_1.V *
+                (edge_1_row * inverse_area) +
+                texture_coordinate_2.V *
+                (edge_2_row * inverse_area) +
+                texture_coordinate_3.V *
+                (edge_3_row * inverse_area)) *
+            texture_height;
+        const float texture_x_step_x =
+            (texture_coordinate_1.U *
+                (edge_1_step_x * inverse_area) +
+                texture_coordinate_2.U *
+                (edge_2_step_x * inverse_area) +
+                texture_coordinate_3.U *
+                (edge_3_step_x * inverse_area)) *
+            texture_width;
+        const float texture_y_step_x =
+            (texture_coordinate_1.V *
+                (edge_1_step_x * inverse_area) +
+                texture_coordinate_2.V *
+                (edge_2_step_x * inverse_area) +
+                texture_coordinate_3.V *
+                (edge_3_step_x * inverse_area)) *
+            texture_height;
+        const float texture_x_step_y =
+            (texture_coordinate_1.U *
+                (edge_1_step_y * inverse_area) +
+                texture_coordinate_2.U *
+                (edge_2_step_y * inverse_area) +
+                texture_coordinate_3.U *
+                (edge_3_step_y * inverse_area)) *
+            texture_width;
+        const float texture_y_step_y =
+            (texture_coordinate_1.V *
+                (edge_1_step_y * inverse_area) +
+                texture_coordinate_2.V *
+                (edge_2_step_y * inverse_area) +
+                texture_coordinate_3.V *
+                (edge_3_step_y * inverse_area)) *
+            texture_height;
 
         ImU32* destination_row =
             pixel_buffer +
@@ -2660,20 +2657,15 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
             if (has_coverage)
             {
-                float texture_u = texture_u_row;
-                float texture_v = texture_v_row;
+                const float span_offset = (float)span_begin;
 
-                /*
-                 * Preserve affine-plane repeated addition up to the first
-                 * pixel in the span.
-                 */
-                for (int offset = 0;
-                    offset < span_begin;
-                    ++offset)
-                {
-                    texture_u += texture_u_step_x;
-                    texture_v += texture_v_step_x;
-                }
+                float sampled_texture_x =
+                    texture_x_row +
+                    texture_x_step_x * span_offset;
+
+                float sampled_texture_y =
+                    texture_y_row +
+                    texture_y_step_x * span_offset;
 
                 const int span_width =
                     span_end - span_begin;
@@ -2690,11 +2682,9 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
                     offset < span_width;
                     ++offset)
                 {
-                    int texture_x =
-                        (int)(texture_u * texture->Width);
+                    int texture_x = (int)sampled_texture_x;
 
-                    int texture_y =
-                        (int)(texture_v * texture->Height);
+                    int texture_y = (int)sampled_texture_y;
 
                     texture_x = IMGUI_IMPL_GDI_CLAMP(
                         texture_x,
@@ -2730,8 +2720,8 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
 
                     ++destination;
 
-                    texture_u += texture_u_step_x;
-                    texture_v += texture_v_step_x;
+                    sampled_texture_x += texture_x_step_x;
+                    sampled_texture_y += texture_y_step_x;
                 }
             }
 
@@ -2741,8 +2731,8 @@ static void ImGui_ImplGDI_RenderTriangleCommand(
             edge_2_row += edge_2_step_y;
             edge_3_row += edge_3_step_y;
 
-            texture_u_row += texture_u_step_y;
-            texture_v_row += texture_v_step_y;
+            texture_x_row += texture_x_step_y;
+            texture_y_row += texture_y_step_y;
         }
 
 #if defined(IMGUI_IMPL_GDI_ENABLE_STATS)
