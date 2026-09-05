@@ -35,6 +35,61 @@ static inline bool naive_swr_imgui_is_white_uv(
     return Coordinate.x == WhiteUv.x && Coordinate.y == WhiteUv.y;
 }
 
+static bool naive_swr_imgui_is_opaque_white_texel(
+    PCNAIVE_SWR_TEXTURE Texture,
+    const ImVec2& Coordinate)
+{
+    if (Texture == nullptr ||
+        Texture->Pixels == nullptr ||
+        Texture->Width <= 0 ||
+        Texture->Height <= 0)
+    {
+        return false;
+    }
+
+    size_t BytesPerPixel;
+
+    switch (Texture->Format)
+    {
+    case NAIVE_SWR_TEXTURE_FORMAT_ALPHA8:
+        BytesPerPixel = 1;
+        break;
+    case NAIVE_SWR_TEXTURE_FORMAT_RGBA32:
+        BytesPerPixel = 4;
+        break;
+    default:
+        return false;
+    }
+
+    if (Texture->ByteStride / BytesPerPixel < (size_t)Texture->Width)
+    {
+        return false;
+    }
+
+    const double TextureX = (double)Coordinate.x * Texture->Width;
+    const double TextureY = (double)Coordinate.y * Texture->Height;
+
+    if (!(TextureX >= 0.0 && TextureX < (double)Texture->Width) ||
+        !(TextureY >= 0.0 && TextureY < (double)Texture->Height))
+    {
+        return false;
+    }
+
+    const uint8_t* Texel =
+        Texture->Pixels + (size_t)TextureY * Texture->ByteStride +
+        (size_t)TextureX * BytesPerPixel;
+
+    if (BytesPerPixel == 1)
+    {
+        return Texel[0] == 255;
+    }
+
+    return Texel[0] == 255 &&
+        Texel[1] == 255 &&
+        Texel[2] == 255 &&
+        Texel[3] == 255;
+}
+
 static bool naive_swr_imgui_rgba32_texture_can_use_alpha8(
     const uint8_t* Pixels,
     size_t PixelCount)
@@ -162,11 +217,13 @@ bool naive_swr_imgui_create_texture(
     return true;
 }
 
-uint32_t naive_swr_imgui_make_render_command(
+static uint32_t naive_swr_imgui_build_render_command(
     const ImDrawVert* VertexBuffer,
     const ImDrawIdx* IndexBuffer,
     uint32_t RemainingElementCount,
     PCNAIVE_SWR_TEXTURE Texture,
+    const ImVec2& WhiteUv,
+    bool HasOpaqueWhiteTexel,
     PNAIVE_SWR_RENDER_COMMAND RenderCommand)
 {
     IM_ASSERT(VertexBuffer != nullptr);
@@ -174,8 +231,6 @@ uint32_t naive_swr_imgui_make_render_command(
     IM_ASSERT(RemainingElementCount >= 3u);
     IM_ASSERT(Texture != nullptr);
     IM_ASSERT(RenderCommand != nullptr);
-
-    const ImVec2 WhiteUv = ImGui::GetIO().Fonts->TexUvWhitePixel;
 
     /*
      * First try the canonical ImGui rectangle index pattern:
@@ -209,6 +264,7 @@ uint32_t naive_swr_imgui_make_render_command(
             D.uv.x == A.uv.x;
 
         const bool TextureIsWhite =
+            HasOpaqueWhiteTexel &&
             naive_swr_imgui_is_white_uv(A.uv, WhiteUv) &&
             naive_swr_imgui_is_white_uv(B.uv, WhiteUv) &&
             naive_swr_imgui_is_white_uv(C.uv, WhiteUv) &&
@@ -302,8 +358,9 @@ uint32_t naive_swr_imgui_make_render_command(
         (Vertices[0]->col ^ Vertices[1]->col) |
         (Vertices[0]->col ^ Vertices[2]->col);
 
-    const bool TextureIsWhite = naive_swr_imgui_is_white_uv(
-        Vertices[0]->uv, WhiteUv) &&
+    const bool TextureIsWhite =
+        HasOpaqueWhiteTexel &&
+        naive_swr_imgui_is_white_uv(Vertices[0]->uv, WhiteUv) &&
         naive_swr_imgui_is_white_uv(Vertices[1]->uv, WhiteUv) &&
         naive_swr_imgui_is_white_uv(Vertices[2]->uv, WhiteUv);
 
@@ -417,6 +474,10 @@ void naive_swr_imgui_render_draw_command(
         return;
     }
 
+    const ImVec2 WhiteUv = ImGui::GetIO().Fonts->TexUvWhitePixel;
+    const bool HasOpaqueWhiteTexel = naive_swr_imgui_is_opaque_white_texel(
+        Texture, WhiteUv);
+
     const ImDrawVert* VertexBuffer =
         DrawList->VtxBuffer.Data + DrawCommand->VtxOffset;
     const ImDrawIdx* IndexBuffer =
@@ -429,11 +490,13 @@ void naive_swr_imgui_render_draw_command(
         const uint32_t RemainingCount = ElementCount - ElementOffset;
         NAIVE_SWR_RENDER_COMMAND RenderCommand;
 
-        const uint32_t ConsumedCount = naive_swr_imgui_make_render_command(
+        const uint32_t ConsumedCount = naive_swr_imgui_build_render_command(
             VertexBuffer,
             IndexBuffer + ElementOffset,
             RemainingCount,
             Texture,
+            WhiteUv,
+            HasOpaqueWhiteTexel,
             &RenderCommand);
 
         IM_ASSERT(ConsumedCount == 3u || ConsumedCount == 6u);

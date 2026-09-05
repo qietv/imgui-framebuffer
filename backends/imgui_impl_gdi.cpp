@@ -2,7 +2,10 @@
 // This needs to be used along with a Platform Backend (e.g. Win32)
 
 // Implemented features:
-//  [x] Renderer: Basic Implementation
+//  [x] Renderer: Basic implementation.
+//  [x] Renderer: Dynamic texture updates.
+//  [x] Renderer: Large meshes with 16-bit indices (ImDrawCmd::VtxOffset).
+//  [x] Renderer: Reset render state callback.
 
 // The aim of imgui_impl_gdi.h/.cpp is to be usable in your engine without any modification.
 // IF YOU FEEL YOU NEED TO MAKE ANY CHANGE TO THIS CODE, please share them and your feedback at https://github.com/ocornut/imgui/
@@ -177,6 +180,14 @@ static void ImGui_ImplGDI_UpdateTexture(
     }
 }
 
+static void ImGui_ImplGDI_DrawCallback_ResetRenderState(
+    const ImDrawList*,
+    const ImDrawCmd*)
+{
+    // Intentionally empty. The software renderer has no persistent render
+    // state to reset.
+}
+
 IMGUI_IMPL_API bool ImGui_ImplGDI_Init()
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -192,7 +203,13 @@ IMGUI_IMPL_API bool ImGui_ImplGDI_Init()
         return false;
 
     io.BackendRendererUserData = backend_data;
+    io.BackendRendererName = "imgui_impl_gdi";
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+
+    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+    platform_io.DrawCallback_ResetRenderState =
+        ImGui_ImplGDI_DrawCallback_ResetRenderState;
 
     return true;
 }
@@ -221,10 +238,13 @@ IMGUI_IMPL_API void ImGui_ImplGDI_Shutdown()
     IM_DELETE(backend_data);
 
     ImGuiIO& io = ImGui::GetIO();
+    io.BackendRendererName = nullptr;
     io.BackendRendererUserData = nullptr;
     io.BackendFlags &= ~(
         ImGuiBackendFlags_RendererHasVtxOffset |
         ImGuiBackendFlags_RendererHasTextures);
+
+    ImGui::GetPlatformIO().ClearRendererHandlers();
 }
 
 IMGUI_IMPL_API void ImGui_ImplGDI_NewFrame()

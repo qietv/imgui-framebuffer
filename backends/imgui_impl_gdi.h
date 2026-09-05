@@ -2,7 +2,10 @@
 // This needs to be used along with a Platform Backend (e.g. Win32)
 
 // Implemented features:
-//  [x] Renderer: Basic Implementation
+//  [x] Renderer: Basic implementation.
+//  [x] Renderer: Dynamic texture updates.
+//  [x] Renderer: Large meshes with 16-bit indices (ImDrawCmd::VtxOffset).
+//  [x] Renderer: Reset render state callback.
 
 // The aim of imgui_impl_gdi.h/.cpp is to be usable in your engine without any modification.
 // IF YOU FEEL YOU NEED TO MAKE ANY CHANGE TO THIS CODE, please share them and your feedback at https://github.com/ocornut/imgui/

@@ -67,6 +67,9 @@ int main(int, char**)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;   // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;    // Enable Gamepad Controls
 
+    // Enable for higher-quality AA lines at the cost of performance.
+    //io.Fonts->Flags |= ImFontAtlasFlags_NoBakedLines;
+
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
     //ImGui::StyleColorsClassic();
